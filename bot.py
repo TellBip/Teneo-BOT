@@ -210,18 +210,20 @@ class Teneo:
                             return None
                         response.raise_for_status()
                         result = await response.json()
-                        token = result['access_token']
-                        self.save_token(email, token)
-                        return token
+                        token = result.get('access_token')
+                        if token:
+                            self.save_token(email, token)
+                            return token
+                        return None
             except ClientResponseError as e:
                 if e.status == 401:
                     self.print_message(email, proxy, Fore.RED, "Invalid credentials")
                     return None
-                return self.print_message(email, proxy, Fore.RED, f"GET Access Token Failed: {str(e)}")
+                raise  # Пробрасываем остальные ошибки выше
             except Exception as e:
-                return self.print_message(email, proxy, Fore.RED, f"GET Access Token Failed: {str(e)}")
+                raise  # Пробрасываем все остальные ошибки выше
         except Exception as e:
-            return self.print_message(email, proxy, Fore.RED, f"Captcha Error: {str(e)}")
+            raise  # Пробрасываем ошибки капчи выше
         
     async def connect_websocket(self, email: str, token: str, use_proxy: bool):
         wss_url = f"wss://secure.ws.teneo.pro/websocket?accessToken={token}&version=v0.2"
@@ -323,29 +325,19 @@ class Teneo:
             
     async def get_access_token(self, email: str, password: str, use_proxy: bool):
         proxy = self.get_next_proxy_for_account(email) if use_proxy else None
-        token = None
-        while token is None:
-            try:
-                token = await self.user_login(email, password, proxy)
-                if not token:
-                    # Проверяем был ли это 401 (Unauthorized)
-                    if hasattr(token, 'status') and token.status == 401:
-                        self.print_message(email, proxy, Fore.RED, "Invalid credentials")
-                        return None
-                    proxy = self.rotate_proxy_for_account(email) if use_proxy else None
-                    await asyncio.sleep(5)
-                    continue
-                
+        try:
+            token = await self.user_login(email, password, proxy)
+            if token:
                 self.print_message(email, proxy, Fore.GREEN, "Access Token Obtained Successfully")
                 return token
-            except Exception as e:
-                if "401" in str(e) or "Unauthorized" in str(e):
-                    self.print_message(email, proxy, Fore.RED, f"Invalid credentials: {str(e)}")
-                    return None
-                proxy = self.rotate_proxy_for_account(email) if use_proxy else None
-                await asyncio.sleep(5)
-                continue
-        
+            return None  # Если token None, значит была ошибка авторизации
+        except Exception as e:
+            if "401" in str(e) or "Unauthorized" in str(e):
+                self.print_message(email, proxy, Fore.RED, "Invalid credentials")
+                return None
+            self.print_message(email, proxy, Fore.RED, f"Error: {str(e)}")
+            return None
+
     def get_saved_token(self, email: str) -> str:
         """Получает сохраненный токен из accounts.json для указанного email"""
         try:
