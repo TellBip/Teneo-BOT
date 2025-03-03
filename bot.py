@@ -11,6 +11,9 @@ from data.config import CAPTCHA_SERVICE, CAPTCHA_API_KEY
 from core.captcha import ServiceCapmonster, ServiceAnticaptcha, Service2Captcha
 import asyncio, json, os
 
+# Initialize colorama for Windows
+init(autoreset=True)
+
 class Teneo:
     def __init__(self) -> None:
         self.headers = {
@@ -49,6 +52,7 @@ class Teneo:
         )
 
     def welcome(self):
+        telegram_link = "https://t.me/+1fc0or8gCHsyNGFi"
         print(f"""
         {Fore.GREEN + Style.BRIGHT}
         TTTTTT EEEE N   N EEEE  OOO  
@@ -58,7 +62,7 @@ class Teneo:
           TT   EEEE N   N EEEE  OOO  
         {Style.RESET_ALL}
 {Fore.GREEN + Style.BRIGHT}Developed by: @Tell_Bip{Style.RESET_ALL}
-{Fore.GREEN + Style.BRIGHT}Our Telegram channel: {Fore.BLUE + Style.BRIGHT}https://t.me/+1fc0or8gCHsyNGFi{Style.RESET_ALL}
+{Fore.GREEN + Style.BRIGHT}Our Telegram channel:{Style.RESET_ALL} {Fore.BLUE + Style.BRIGHT}\x1b]8;;{telegram_link}\x07{telegram_link}\x1b]8;;\x07{Style.RESET_ALL}
         """)
 
     def format_seconds(self, seconds):
