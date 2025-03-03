@@ -388,8 +388,23 @@ class Teneo:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         for account, result in zip(accounts_batch, results):
-            if isinstance(result, Exception) or not result:
+            if isinstance(result, Exception):
+                self.print_message(account['Email'], None, Fore.RED, f"Failed: {str(result)}")
                 failed_accounts.append(account)
+            elif not result:  # If result is None (invalid credentials)
+                failed_accounts.append(account)
+        
+        # Quietly append failed accounts to the file
+        if failed_accounts:
+            try:
+                if not os.path.exists('result'):
+                    os.makedirs('result')
+                
+                with open('result/failed_accounts.txt', 'a', encoding='utf-8') as f:
+                    for account in failed_accounts:
+                        f.write(f"{account['Email']}:{account['Password']}\n")
+            except Exception as e:
+                self.log(f"{Fore.RED}Error appending failed accounts: {str(e)}{Style.RESET_ALL}")
         
         return failed_accounts
 
@@ -427,6 +442,10 @@ class Teneo:
                 total_batches = (len(accounts) + batch_size - 1) // batch_size
                 total_accounts = len(accounts)
                 
+                # Clear failed accounts file before starting
+                if os.path.exists('result/failed_accounts.txt'):
+                    os.remove('result/failed_accounts.txt')
+                
                 self.log(f"{Fore.CYAN}Starting authorization of {total_accounts} accounts in batches of {batch_size}{Style.RESET_ALL}")
                 
                 # Process accounts in batches
@@ -442,7 +461,7 @@ class Teneo:
                     failed_accounts.extend(batch_failed)
                 
                 if failed_accounts:
-                    self.save_failed_accounts(failed_accounts)
+                    self.log(f"{Fore.YELLOW}Failed accounts saved to result/failed_accounts.txt{Style.RESET_ALL}")
                     self.log(f"{Fore.YELLOW}Failed authorizations: {len(failed_accounts)}/{len(accounts)}{Style.RESET_ALL}")
                 else:
                     self.log(f"{Fore.GREEN}All authorizations successful!{Style.RESET_ALL}")
