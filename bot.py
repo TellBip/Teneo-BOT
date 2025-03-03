@@ -433,14 +433,19 @@ class Teneo:
                 failed_accounts = []
                 batch_size = min(MAX_AUTH_THREADS, len(accounts))  # Не больше чем количество аккаунтов
                 total_batches = (len(accounts) + batch_size - 1) // batch_size
+                total_accounts = len(accounts)
                 
-                self.log(f"{Fore.CYAN}Starting authorization in batches of {batch_size} accounts{Style.RESET_ALL}")
+                self.log(f"{Fore.CYAN}Starting authorization of {total_accounts} accounts in batches of {batch_size}{Style.RESET_ALL}")
                 
                 # Process accounts in batches
                 for i in range(0, len(accounts), batch_size):
                     current_batch = i // batch_size + 1
                     batch = list(islice(accounts, i, i + batch_size))
-                    self.log(f"{Fore.CYAN}Processing batch {current_batch}/{total_batches} ({len(batch)} accounts){Style.RESET_ALL}")
+                    accounts_processed = min(i + batch_size, total_accounts)
+                    self.log(
+                        f"{Fore.CYAN}Processing batch {current_batch}/{total_batches} "
+                        f"({len(batch)} accounts, progress: {accounts_processed}/{total_accounts}){Style.RESET_ALL}"
+                    )
                     batch_failed = await self.process_auth_batch(batch, use_proxy)
                     failed_accounts.extend(batch_failed)
                 
