@@ -3,3 +3,6 @@ aiohttp-socks
 fake-useragent
 colorama
 pytz
+capmonster_python
+anticaptchaofficial
+2captcha-python
