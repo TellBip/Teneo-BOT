@@ -7,9 +7,10 @@ from aiohttp_socks import ProxyConnector
 from fake_useragent import FakeUserAgent
 from datetime import datetime
 from colorama import *
-from data.config import CAPTCHA_SERVICE, CAPTCHA_API_KEY
+from data.config import CAPTCHA_SERVICE, CAPTCHA_API_KEY, MAX_AUTH_THREADS
 from core.captcha import ServiceCapmonster, ServiceAnticaptcha, Service2Captcha
 import asyncio, json, os
+from itertools import islice
 
 # Initialize colorama for Windows
 init(autoreset=True)
@@ -347,6 +348,39 @@ class Teneo:
         if token:
             await self.connect_websocket(email, token, use_proxy)
         
+    def save_failed_accounts(self, accounts):
+        """Saves failed authorization accounts to a file"""
+        try:
+            # Create result directory if it doesn't exist
+            if not os.path.exists('result'):
+                os.makedirs('result')
+                
+            with open('result/failed_accounts.txt', 'w', encoding='utf-8') as f:
+                for account in accounts:
+                    f.write(f"{account['Email']}:{account['Password']}\n")
+            self.log(f"{Fore.YELLOW}Failed accounts saved to result/failed_accounts.txt{Style.RESET_ALL}")
+        except Exception as e:
+            self.log(f"{Fore.RED}Error saving failed accounts: {str(e)}{Style.RESET_ALL}")
+
+    async def process_auth_batch(self, accounts_batch, use_proxy):
+        """Process a batch of accounts for authorization"""
+        tasks = []
+        failed_accounts = []
+        
+        for account in accounts_batch:
+            email = account.get('Email')
+            password = account.get('Password')
+            if "@" in email and password:
+                tasks.append(self.get_access_token(email, password, use_proxy))
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for account, result in zip(accounts_batch, results):
+            if isinstance(result, Exception) or not result:
+                failed_accounts.append(account)
+        
+        return failed_accounts
+
     async def main(self):
         try:
             self.welcome()
@@ -376,13 +410,21 @@ class Teneo:
             self.log(f"{Fore.CYAN + Style.BRIGHT}-{Style.RESET_ALL}"*75)
 
             if use_proxy_choice == 2:
-                for account in accounts:
-                    email = account.get('Email')
-                    password = account.get('Password')
-                    if "@" in email and password:
-                        token = await self.get_access_token(email, password, use_proxy)
-                        #if token:
-                            #self.log(f"{Fore.GREEN + Style.BRIGHT}Authorization successful for {email}{Style.RESET_ALL}")
+                failed_accounts = []
+                batch_size = MAX_AUTH_THREADS
+                
+                # Process accounts in batches
+                for i in range(0, len(accounts), batch_size):
+                    batch = list(islice(accounts, i, i + batch_size))
+                    self.log(f"{Fore.CYAN}Processing batch {i//batch_size + 1}/{(len(accounts) + batch_size - 1)//batch_size}{Style.RESET_ALL}")
+                    batch_failed = await self.process_auth_batch(batch, use_proxy)
+                    failed_accounts.extend(batch_failed)
+                
+                if failed_accounts:
+                    self.save_failed_accounts(failed_accounts)
+                    self.log(f"{Fore.YELLOW}Failed authorizations: {len(failed_accounts)}/{len(accounts)}{Style.RESET_ALL}")
+                else:
+                    self.log(f"{Fore.GREEN}All authorizations successful!{Style.RESET_ALL}")
                 return
 
             while True:
