@@ -205,15 +205,23 @@ class Teneo:
             try:
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=120)) as session:
                     async with session.post(url=url, headers=headers, data=data) as response:
+                        if response.status == 401:
+                            self.print_message(email, proxy, Fore.RED, "Invalid credentials")
+                            return None
                         response.raise_for_status()
                         result = await response.json()
                         token = result['access_token']
                         self.save_token(email, token)
                         return token
-            except (Exception, ClientResponseError) as e:
-                return self.print_message(email, proxy, Fore.RED, f"GET Access Token Failed: {Fore.YELLOW + Style.BRIGHT}{str(e)}")
+            except ClientResponseError as e:
+                if e.status == 401:
+                    self.print_message(email, proxy, Fore.RED, "Invalid credentials")
+                    return None
+                return self.print_message(email, proxy, Fore.RED, f"GET Access Token Failed: {str(e)}")
+            except Exception as e:
+                return self.print_message(email, proxy, Fore.RED, f"GET Access Token Failed: {str(e)}")
         except Exception as e:
-            return self.print_message(email, proxy, Fore.RED, f"Captcha Error: {Fore.YELLOW + Style.BRIGHT}{str(e)}")
+            return self.print_message(email, proxy, Fore.RED, f"Captcha Error: {str(e)}")
         
     async def connect_websocket(self, email: str, token: str, use_proxy: bool):
         wss_url = f"wss://secure.ws.teneo.pro/websocket?accessToken={token}&version=v0.2"
@@ -317,14 +325,26 @@ class Teneo:
         proxy = self.get_next_proxy_for_account(email) if use_proxy else None
         token = None
         while token is None:
-            token = await self.user_login(email, password, proxy)
-            if not token:
+            try:
+                token = await self.user_login(email, password, proxy)
+                if not token:
+                    # Проверяем был ли это 401 (Unauthorized)
+                    if hasattr(token, 'status') and token.status == 401:
+                        self.print_message(email, proxy, Fore.RED, "Invalid credentials")
+                        return None
+                    proxy = self.rotate_proxy_for_account(email) if use_proxy else None
+                    await asyncio.sleep(5)
+                    continue
+                
+                self.print_message(email, proxy, Fore.GREEN, "Access Token Obtained Successfully")
+                return token
+            except Exception as e:
+                if "401" in str(e) or "Unauthorized" in str(e):
+                    self.print_message(email, proxy, Fore.RED, f"Invalid credentials: {str(e)}")
+                    return None
                 proxy = self.rotate_proxy_for_account(email) if use_proxy else None
                 await asyncio.sleep(5)
                 continue
-            
-            self.print_message(email, proxy, Fore.GREEN, "Access Token Obtained Successfully")
-            return token
         
     def get_saved_token(self, email: str) -> str:
         """Получает сохраненный токен из accounts.json для указанного email"""
@@ -411,12 +431,16 @@ class Teneo:
 
             if use_proxy_choice == 2:
                 failed_accounts = []
-                batch_size = MAX_AUTH_THREADS
+                batch_size = min(MAX_AUTH_THREADS, len(accounts))  # Не больше чем количество аккаунтов
+                total_batches = (len(accounts) + batch_size - 1) // batch_size
+                
+                self.log(f"{Fore.CYAN}Starting authorization in batches of {batch_size} accounts{Style.RESET_ALL}")
                 
                 # Process accounts in batches
                 for i in range(0, len(accounts), batch_size):
+                    current_batch = i // batch_size + 1
                     batch = list(islice(accounts, i, i + batch_size))
-                    self.log(f"{Fore.CYAN}Processing batch {i//batch_size + 1}/{(len(accounts) + batch_size - 1)//batch_size}{Style.RESET_ALL}")
+                    self.log(f"{Fore.CYAN}Processing batch {current_batch}/{total_batches} ({len(batch)} accounts){Style.RESET_ALL}")
                     batch_failed = await self.process_auth_batch(batch, use_proxy)
                     failed_accounts.extend(batch_failed)
                 
