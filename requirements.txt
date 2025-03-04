@@ -6,3 +6,5 @@ pytz
 capmonster_python
 anticaptchaofficial
 2captcha-python
+beautifulsoup4
+imap-tools
