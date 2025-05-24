@@ -680,162 +680,217 @@ class Teneo:
         self.save_results("reg", success_accounts, failed_accounts)
         return failed_accounts
 
-    async def connect_wallet(self, email: str, token: str, wallet_address: str, private_key: str, proxy=None):
+    async def connect_wallet(self, email: str, token: str, wallet_address: str, private_key: str, proxy=None, max_retries=3):
         """Connects wallet to the account"""
-        try:
-            # Подготовка сообщения для подписи
-            message = f"Permanently link wallet to Teneo account: {email} This can only be done once."
-            
-            # Создание подписи с использованием приватного ключа
-            w3 = Web3()
-            message_hash = encode_defunct(text=message)
-            signed_message = Account.sign_message(message_hash, private_key=private_key)
-            signature = "0x" + signed_message.signature.hex()  # Добавляем префикс 0x к подписи
-            
-            # Подготовка данных для запроса
-            data = json.dumps({
-                "address": wallet_address,
-                "signature": signature,
-                "message": message
-            })
-            
-            url = "https://api.teneo.pro/api/users/link-wallet"
-            headers = {
-                **self.headers,
-                "Authorization": f"Bearer {token}",
-                "Content-Length": str(len(data)),
-                "Content-Type": "application/json"
-            }
-            
-            connector = ProxyConnector.from_url(proxy) if proxy else None
-            async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                async with session.post(url=url, headers=headers, data=data) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    if result.get('status') == 'success' or 'wallet' in result:
-                        # Сохраняем приватный ключ в accounts.json
-                        self.save_account_data(email, private_key=private_key)
-                        self.print_message(email, proxy, Fore.GREEN, f"Wallet {wallet_address} connected successfully")
-                        return True
+        retry_count = 0
+        current_proxy = proxy
+        
+        while retry_count <= max_retries:
+            try:
+                # Подготовка сообщения для подписи
+                message = f"Permanently link wallet to Teneo account: {email} This can only be done once."
+                
+                # Создание подписи с использованием приватного ключа
+                w3 = Web3()
+                message_hash = encode_defunct(text=message)
+                signed_message = Account.sign_message(message_hash, private_key=private_key)
+                signature = "0x" + signed_message.signature.hex()  # Добавляем префикс 0x к подписи
+                
+                # Подготовка данных для запроса
+                data = json.dumps({
+                    "address": wallet_address,
+                    "signature": signature,
+                    "message": message
+                })
+                
+                url = "https://api.teneo.pro/api/users/link-wallet"
+                headers = {
+                    **self.headers,
+                    "Authorization": f"Bearer {token}",
+                    "Content-Length": str(len(data)),
+                    "Content-Type": "application/json"
+                }
+                
+                connector = ProxyConnector.from_url(current_proxy) if current_proxy else None
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers, data=data) as response:
+                        response.raise_for_status()
+                        result = await response.json()
+                        if result.get('status') == 'success' or 'wallet' in result:
+                            # Сохраняем приватный ключ в accounts.json
+                            self.save_account_data(email, private_key=private_key)
+                            self.print_message(email, current_proxy, Fore.GREEN, f"Wallet {wallet_address} connected successfully")
+                            return True
+                        else:
+                            self.print_message(email, current_proxy, Fore.RED, f"Failed to connect wallet: {result.get('message', 'Unknown error')}")
+                            return False
+            except Exception as e:
+                # Проверяем, связана ли ошибка с прокси
+                if "Couldn't connect to proxy" in str(e) or "proxy" in str(e).lower() or "timeout" in str(e).lower() or "connection" in str(e).lower():
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        current_proxy = self.rotate_proxy_for_account(email)
+                        self.print_message(email, current_proxy, Fore.YELLOW, f"Proxy error, rotating to new proxy. Retry {retry_count}/{max_retries}")
                     else:
-                        self.print_message(email, proxy, Fore.RED, f"Failed to connect wallet: {result.get('message', 'Unknown error')}")
+                        self.print_message(email, current_proxy, Fore.RED, f"Error connecting wallet after {max_retries} retries: {str(e)}")
                         return False
-        except Exception as e:
-            self.print_message(email, proxy, Fore.RED, f"Error connecting wallet: {str(e)}")
-            return False
+                else:
+                    self.print_message(email, current_proxy, Fore.RED, f"Error connecting wallet: {str(e)}")
+                    return False
 
-    async def check_wallet_status(self, email: str, token: str, proxy=None):
+    async def check_wallet_status(self, email: str, token: str, proxy=None, max_retries=3):
         """Проверяет статус привязки кошелька к аккаунту"""
-        try:
-            url = "https://api.teneo.pro/api/users/smart-id-requirements"
-            headers = {
-                **self.headers,
-                "Authorization": f"Bearer {token}"
-            }
-            
-            connector = ProxyConnector.from_url(proxy) if proxy else None
-            async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                async with session.get(url=url, headers=headers) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    wallet_status = result.get('wallet', False)
-                    heartbeats = result.get('currentHeartbeats', 0)
-                    requirements_met = result.get('requirementsMet', False)
-                    existing_smart_account = result.get('existingSmartAccount', False)
-                    status = result.get('status', 'unknown')
-                    
-                    status_message = (
-                        f"Wallet status: {'Connected' if wallet_status else 'Not connected'}, "
-                        f"Heartbeats: {heartbeats}, "
-                        f"Requirements met: {'Yes' if requirements_met else 'No'}, "
-                        f"Smart Account: {'Exists' if existing_smart_account else 'Not exists'}, "
-                        f"Status: {status}"
-                    )
-                    
-                    self.print_message(email, proxy, Fore.CYAN, status_message)
-                    return result
-                    
-        except Exception as e:
-            self.print_message(email, proxy, Fore.RED, f"Error checking wallet status: {str(e)}")
-            return None
-
-    async def connect_wallet_to_dashboard(self, email: str, token: str, proxy=None):
-        """Connects the linked wallet to the Teneo dashboard"""
-        try:
-            url = "https://api.teneo.pro/api/users/connect-smart-id"
-            headers = {
-                **self.headers,
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-            
-            connector = ProxyConnector.from_url(proxy) if proxy else None
-            async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                async with session.post(url=url, headers=headers) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    if result.get('status') == 'success' or result.get('connected') == True:
-                        self.print_message(email, proxy, Fore.GREEN, "Wallet successfully connected to dashboard")
-                        return True
+        retry_count = 0
+        current_proxy = proxy
+        
+        while retry_count <= max_retries:
+            try:
+                url = "https://api.teneo.pro/api/users/smart-id-requirements"
+                headers = {
+                    **self.headers,
+                    "Authorization": f"Bearer {token}"
+                }
+                
+                connector = ProxyConnector.from_url(current_proxy) if current_proxy else None
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.get(url=url, headers=headers) as response:
+                        response.raise_for_status()
+                        result = await response.json()
+                        
+                        wallet_status = result.get('wallet', False)
+                        heartbeats = result.get('currentHeartbeats', 0)
+                        requirements_met = result.get('requirementsMet', False)
+                        existing_smart_account = result.get('existingSmartAccount', False)
+                        status = result.get('status', 'unknown')
+                        
+                        status_message = (
+                            f"Wallet status: {'Connected' if wallet_status else 'Not connected'}, "
+                            f"Heartbeats: {heartbeats}, "
+                            f"Requirements met: {'Yes' if requirements_met else 'No'}, "
+                            f"Smart Account: {'Exists' if existing_smart_account else 'Not exists'}, "
+                            f"Status: {status}"
+                        )
+                        
+                        self.print_message(email, current_proxy, Fore.CYAN, status_message)
+                        return result
+            except Exception as e:
+                # Проверяем, связана ли ошибка с прокси
+                if "Couldn't connect to proxy" in str(e) or "proxy" in str(e).lower() or "timeout" in str(e).lower() or "connection" in str(e).lower():
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        current_proxy = self.rotate_proxy_for_account(email)
+                        self.print_message(email, current_proxy, Fore.YELLOW, f"Proxy error, rotating to new proxy. Retry {retry_count}/{max_retries}")
                     else:
-                        self.print_message(email, proxy, Fore.RED, f"Failed to connect wallet to dashboard: {result.get('message', 'Unknown error')}")
-                        return False
-                    
-        except Exception as e:
-            self.print_message(email, proxy, Fore.RED, f"Error connecting wallet to dashboard: {str(e)}")
-            return False
+                        self.print_message(email, current_proxy, Fore.RED, f"Error checking wallet status after {max_retries} retries: {str(e)}")
+                        return None
+                else:
+                    self.print_message(email, current_proxy, Fore.RED, f"Error checking wallet status: {str(e)}")
+                    return None
 
-    async def create_smart_account(self, email: str, token: str, wallet_address: str, private_key: str, proxy=None):
+    async def create_smart_account(self, email: str, token: str, wallet_address: str, private_key: str, proxy=None, max_retries=3):
         """Creates a smart account using the peaq API"""
-        try:
-            # Генерируем nonce (текущее время в миллисекундах)
-            nonce = str(int(datetime.now().timestamp() * 1000))
-            
-            # Подготавливаем сообщение для подписи
-            # Предполагаем, что сообщение включает nonce
-            message = f"Create Teneo Smart Account with nonce: {nonce}"
-            
-            # Подписываем сообщение
-            w3 = Web3()
-            message_hash = encode_defunct(text=message)
-            signed_message = Account.sign_message(message_hash, private_key=private_key)
-            signature = signed_message.signature.hex()
-            
-            # Добавляем префикс 0x, если его нет
-            if not signature.startswith("0x"):
-                signature = "0x" + signature
-            
-            # Подготовка данных для запроса
-            data = json.dumps({
-                "machineOwner": wallet_address.lower(),  # Адрес в нижнем регистре
-                "nonce": nonce,
-                "signature": signature
-            })
-            
-            url = "https://api.teneo.pro/api/peaq/create-smart-account"
-            headers = {
-                **self.headers,
-                "Authorization": f"Bearer {token}",
-                "Content-Length": str(len(data)),
-                "Content-Type": "application/json"
-            }
-            
-            connector = ProxyConnector.from_url(proxy) if proxy else None
-            async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                async with session.post(url=url, headers=headers, data=data) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    if result.get('success') == True:
-                        self.print_message(email, proxy, Fore.GREEN, f"Smart account created successfully. TX Hash: {result.get('txHash', 'N/A')}")
-                        return True
+        retry_count = 0
+        current_proxy = proxy
+        
+        while retry_count <= max_retries:
+            try:
+                # Генерируем nonce (текущее время в миллисекундах)
+                nonce = str(int(datetime.now().timestamp() * 1000))
+                
+                # Подготавливаем сообщение для подписи
+                # Предполагаем, что сообщение включает nonce
+                message = f"Create Teneo Smart Account with nonce: {nonce}"
+                
+                # Подписываем сообщение
+                w3 = Web3()
+                message_hash = encode_defunct(text=message)
+                signed_message = Account.sign_message(message_hash, private_key=private_key)
+                signature = signed_message.signature.hex()
+                
+                # Добавляем префикс 0x, если его нет
+                if not signature.startswith("0x"):
+                    signature = "0x" + signature
+                
+                # Подготовка данных для запроса
+                data = json.dumps({
+                    "machineOwner": wallet_address.lower(),  # Адрес в нижнем регистре
+                    "nonce": nonce,
+                    "signature": signature
+                })
+                
+                url = "https://api.teneo.pro/api/peaq/create-smart-account"
+                headers = {
+                    **self.headers,
+                    "Authorization": f"Bearer {token}",
+                    "Content-Length": str(len(data)),
+                    "Content-Type": "application/json"
+                }
+                
+                connector = ProxyConnector.from_url(current_proxy) if current_proxy else None
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers, data=data) as response:
+                        response.raise_for_status()
+                        result = await response.json()
+                        if result.get('success') == True:
+                            self.print_message(email, current_proxy, Fore.GREEN, f"Smart account created successfully. TX Hash: {result.get('txHash', 'N/A')}")
+                            return True
+                        else:
+                            self.print_message(email, current_proxy, Fore.RED, f"Failed to create smart account: {result.get('message', 'Unknown error')}")
+                            return False
+                
+            except Exception as e:
+                # Проверяем, связана ли ошибка с прокси
+                if "Couldn't connect to proxy" in str(e) or "proxy" in str(e).lower() or "timeout" in str(e).lower() or "connection" in str(e).lower():
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        current_proxy = self.rotate_proxy_for_account(email)
+                        self.print_message(email, current_proxy, Fore.YELLOW, f"Proxy error, rotating to new proxy. Retry {retry_count}/{max_retries}")
                     else:
-                        self.print_message(email, proxy, Fore.RED, f"Failed to create smart account: {result.get('message', 'Unknown error')}")
+                        self.print_message(email, current_proxy, Fore.RED, f"Error creating smart account after {max_retries} retries: {str(e)}")
                         return False
-                    
-        except Exception as e:
-            self.print_message(email, proxy, Fore.RED, f"Error creating smart account: {str(e)}")
-            return False
+                else:
+                    self.print_message(email, current_proxy, Fore.RED, f"Error creating smart account: {str(e)}")
+                    return False
+
+    async def connect_wallet_to_dashboard(self, email: str, token: str, proxy=None, max_retries=3):
+        """Connects the linked wallet to the Teneo dashboard"""
+        retry_count = 0
+        current_proxy = proxy
+        
+        while retry_count <= max_retries:
+            try:
+                url = "https://api.teneo.pro/api/users/connect-smart-id"
+                headers = {
+                    **self.headers,
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json"
+                }
+                
+                connector = ProxyConnector.from_url(current_proxy) if current_proxy else None
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers) as response:
+                        response.raise_for_status()
+                        result = await response.json()
+                        if result.get('status') == 'success' or result.get('connected') == True:
+                            self.print_message(email, current_proxy, Fore.GREEN, "Wallet successfully connected to dashboard")
+                            return True
+                        else:
+                            self.print_message(email, current_proxy, Fore.RED, f"Failed to connect wallet to dashboard: {result.get('message', 'Unknown error')}")
+                            return False
+                        
+            except Exception as e:
+                # Проверяем, связана ли ошибка с прокси
+                if "Couldn't connect to proxy" in str(e) or "proxy" in str(e).lower() or "timeout" in str(e).lower() or "connection" in str(e).lower():
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        current_proxy = self.rotate_proxy_for_account(email)
+                        self.print_message(email, current_proxy, Fore.YELLOW, f"Proxy error, rotating to new proxy. Retry {retry_count}/{max_retries}")
+                    else:
+                        self.print_message(email, current_proxy, Fore.RED, f"Error connecting wallet to dashboard after {max_retries} retries: {str(e)}")
+                        return False
+                else:
+                    self.print_message(email, current_proxy, Fore.RED, f"Error connecting wallet to dashboard: {str(e)}")
+                    return False
 
     async def process_wallet_connection(self, email: str, password: str, wallet_address: str, private_key: str, use_proxy: bool):
         """Process wallet connection for one account"""
