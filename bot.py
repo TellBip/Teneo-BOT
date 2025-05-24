@@ -164,9 +164,12 @@ class Teneo:
                 "wallet": "result/bad_wallet.txt"
             }.get(operation_type)
 
+            # Всегда используем режим добавления (append) для всех типов операций
+            file_mode = 'a'
+
             # Save successful accounts
             if success_accounts and success_file:
-                with open(success_file, 'w', encoding='utf-8') as f:
+                with open(success_file, file_mode, encoding='utf-8') as f:
                     for account in success_accounts:
                         if operation_type == "wallet" and "PrivateKey" in account:
                             f.write(f"{account['Email']}:{account['Password']}:{account['PrivateKey']}\n")
@@ -176,7 +179,7 @@ class Teneo:
 
             # Save failed accounts
             if failed_accounts and failed_file:
-                with open(failed_file, 'w', encoding='utf-8') as f:
+                with open(failed_file, file_mode, encoding='utf-8') as f:
                     for account in failed_accounts:
                         if operation_type == "wallet" and "PrivateKey" in account:
                             f.write(f"{account['Email']}:{account['Password']}:{account['PrivateKey']}\n")
