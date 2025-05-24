@@ -100,7 +100,7 @@
    
    MAX_AUTH_THREADS = 5  # Maximum threads for authorization
    MAX_REG_THREADS = 3   # Maximum threads for registration
-   INVITE_CODE = "V5mx3" # Referral code
+   INVITE_CODE = "Svaag" # Referral code
    ```
 
 8. **mail_config.py:** Configure email settings in `core/config/mail_config.py` for supported email domains.
