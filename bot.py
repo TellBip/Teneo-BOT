@@ -9,10 +9,16 @@ from datetime import datetime
 from colorama import *
 from core.config.config import CAPTCHA_SERVICE, CAPTCHA_API_KEY, MAX_AUTH_THREADS, MAX_REG_THREADS, INVITE_CODE
 from core.config.mail_config import MailConfig
-from core.captcha import ServiceCapmonster, ServiceAnticaptcha, Service2Captcha
+from core.captcha import ServiceCapmonster, ServiceAnticaptcha, Service2Captcha, CFLSolver
 from core.mail import check_if_email_valid, check_email_for_code
 import asyncio, json, os
 from itertools import islice
+from web3 import Web3
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from httpx import AsyncClient
+import base64
+import secrets
 
 # Initialize colorama for Windows
 init(autoreset=True)
@@ -36,15 +42,19 @@ class Teneo:
         self.session = None
         self.mail_config = MailConfig()
         
-        # Инициализация сервиса капчи
+        # Captcha service initialization
         if CAPTCHA_SERVICE.lower() == "2captcha":
             self.captcha_solver = Service2Captcha(CAPTCHA_API_KEY)
         elif CAPTCHA_SERVICE.lower() == "capmonster":
             self.captcha_solver = ServiceCapmonster(CAPTCHA_API_KEY)
         elif CAPTCHA_SERVICE.lower() == "anticaptcha":
             self.captcha_solver = ServiceAnticaptcha(CAPTCHA_API_KEY)
+        elif CAPTCHA_SERVICE.lower() == "cflsolver":
+            self.http_client = AsyncClient()
+            self.captcha_solver = CFLSolver(CAPTCHA_API_KEY, self.http_client)
         else:
-            raise ValueError(f"Неподдерживаемый сервис капчи: {CAPTCHA_SERVICE}")
+            raise ValueError(f"Unsupported captcha service: {CAPTCHA_SERVICE}")
+
 
     async def start(self):
         """Инициализация сессии"""
@@ -88,11 +98,12 @@ class Teneo:
         return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
     
     def load_accounts(self, operation_type: str = None):
-        """Load accounts based on operation type (reg/auth/farm)"""
+        """Load accounts based on operation type (reg/auth/farm/wallet)"""
         filename = {
             "reg": "data/reg.txt",
             "auth": "data/auth.txt",
-            "farm": "data/farm.txt"
+            "farm": "data/farm.txt",
+            "wallet": "data/wallet.txt"
         }.get(operation_type, "data/accounts.txt")
 
         try:
@@ -103,8 +114,29 @@ class Teneo:
             with open(filename, 'r', encoding='utf-8') as file:
                 for line in file:
                     line = line.strip()
-                    if line and ':' in line:
-                        email, password = line.split(':', 1)
+                    if not line:
+                        continue
+                    
+                    parts = line.split(':', 2)  # Максимум 3 части
+                    
+                    if operation_type == "wallet" and len(parts) == 3:
+                        # Формат login:pass:privatekey для wallet.txt
+                        email, password, private_key = parts
+                        # Получаем адрес кошелька из приватного ключа
+                        try:
+                            account = Account.from_key(private_key)
+                            wallet_address = account.address
+                            accounts.append({
+                                "Email": email.strip(), 
+                                "Password": password.strip(), 
+                                "PrivateKey": private_key.strip(),
+                                "Wallet": wallet_address
+                            })
+                        except Exception as e:
+                            self.log(f"{Fore.RED}Error deriving wallet address from private key for {email}: {e}{Style.RESET_ALL}")
+                    elif len(parts) >= 2:
+                        # Стандартный формат login:pass
+                        email, password = parts[0], parts[1]
                         accounts.append({"Email": email.strip(), "Password": password.strip()})
             return accounts
         except Exception as e:
@@ -121,27 +153,35 @@ class Teneo:
             success_file = {
                 "reg": "result/good_reg.txt",
                 "auth": "result/good_auth.txt",
-                "farm": "result/good_farm.txt"
+                "farm": "result/good_farm.txt",
+                "wallet": "result/good_wallet.txt"
             }.get(operation_type)
 
             failed_file = {
                 "reg": "result/bad_reg.txt",
                 "auth": "result/bad_auth.txt",
-                "farm": "result/bad_farm.txt"
+                "farm": "result/bad_farm.txt",
+                "wallet": "result/bad_wallet.txt"
             }.get(operation_type)
 
             # Save successful accounts
-            if success_accounts:
+            if success_accounts and success_file:
                 with open(success_file, 'w', encoding='utf-8') as f:
                     for account in success_accounts:
-                        f.write(f"{account['Email']}:{account['Password']}\n")
+                        if operation_type == "wallet" and "PrivateKey" in account:
+                            f.write(f"{account['Email']}:{account['Password']}:{account['PrivateKey']}\n")
+                        else:
+                            f.write(f"{account['Email']}:{account['Password']}\n")
                 self.log(f"{Fore.GREEN}Successful accounts saved to {success_file}{Style.RESET_ALL}")
 
             # Save failed accounts
-            if failed_accounts:
+            if failed_accounts and failed_file:
                 with open(failed_file, 'w', encoding='utf-8') as f:
                     for account in failed_accounts:
-                        f.write(f"{account['Email']}:{account['Password']}\n")
+                        if operation_type == "wallet" and "PrivateKey" in account:
+                            f.write(f"{account['Email']}:{account['Password']}:{account['PrivateKey']}\n")
+                        else:
+                            f.write(f"{account['Email']}:{account['Password']}\n")
                 self.log(f"{Fore.YELLOW}Failed accounts saved to {failed_file}{Style.RESET_ALL}")
 
         except Exception as e:
@@ -217,37 +257,51 @@ class Teneo:
                 print("1. Registration")
                 print("2. Authorization")
                 print("3. Farm")
-                choose = int(input("Choose action [1/2/3] -> ").strip())
+                print("4. Wallet Connection & Creating smart account")
+                print("5. Exit")
+                choose = int(input("Choose action [1/2/3/4/5] -> ").strip())
 
-                if choose in [1, 2, 3]:
+                if choose in [1, 2, 3, 4, 5]:
+                    if choose == 5:
+                        print(f"{Fore.RED + Style.BRIGHT}Exiting program...{Style.RESET_ALL}")
+                        exit(0)  # Завершаем программу
+                        
                     action_type = (
                         "Registration" if choose == 1 else 
                         "Authorization" if choose == 2 else 
-                        "Farm"
+                        "Farm" if choose == 3 else
+                        "Wallet Connection & Creating smart account"
                     )
                     print(f"{Fore.GREEN + Style.BRIGHT}Selected: {action_type}{Style.RESET_ALL}")
                     return choose
                 else:
-                    print(f"{Fore.RED + Style.BRIGHT}Please enter a number from 1 to 3.{Style.RESET_ALL}")
+                    print(f"{Fore.RED + Style.BRIGHT}Please enter a number from 1 to 5.{Style.RESET_ALL}")
             except ValueError:
-                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1, 2 or 3).{Style.RESET_ALL}")
+                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1, 2, 3, 4 or 5).{Style.RESET_ALL}")
     
-    def save_token(self, email: str, token: str):
-        """Saves authorization token to accounts.json file"""
+    def save_account_data(self, email: str, token: str = None, private_key: str = None):
+        """Сохраняет данные аккаунта (токен, приватный ключ) в accounts.json файл"""
         try:
             data = {}
             if os.path.exists('data/accounts.json'):
                 with open('data/accounts.json', 'r', encoding='utf-8') as f:
                     data = json.load(f)
             
-            data[email] = {"token": token}
+            if email not in data:
+                data[email] = {}
+                
+            if token:
+                data[email]["token"] = token
+                
+            if private_key:
+                data[email]["wallet"] = private_key
             
             with open('data/accounts.json', 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
                 
-            self.print_message(email, None, Fore.GREEN, "Token saved successfully")
+            self.print_message(email, None, Fore.GREEN, "Account data saved successfully")
         except Exception as e:
-            self.print_message(email, None, Fore.RED, f"Error saving token: {str(e)}")
+            self.print_message(email, None, Fore.RED, f"Error saving account data: {str(e)}")
 
     async def user_login(self, email: str, password: str, proxy=None):
         try:
@@ -271,7 +325,7 @@ class Teneo:
                         result = await response.json()
                         token = result.get('access_token')
                         if token:
-                            self.save_token(email, token)
+                            self.save_account_data(email, token=token)
                             return token
                         return None
             except ClientResponseError as e:
@@ -294,7 +348,7 @@ class Teneo:
             "Origin": "chrome-extension://emcclcoaglgcpoognfiggmhnhgabppkm",
             "Pragma": "no-cache",
             "Sec-WebSocket-Extensions": "permessage-deflate; client_max_window_bits",
-            "Sec-WebSocket-Key": "g0PDYtLWQOmaBE5upOBXew==",
+            "Sec-WebSocket-Key": base64.b64encode(secrets.token_bytes(16)).decode(),
             "Sec-WebSocket-Version": "13",
             "Upgrade": "websocket",
             "User-Agent": FakeUserAgent().random
@@ -307,6 +361,9 @@ class Teneo:
             session = ClientSession(connector=connector, timeout=ClientTimeout(total=300))
             try:
                 async with session:
+                    # Генерируем новый ключ для каждой попытки подключения
+                    headers["Sec-WebSocket-Key"] = base64.b64encode(secrets.token_bytes(16)).decode()
+                    
                     async with session.ws_connect(wss_url, headers=headers) as wss:
                         self.print_message(email, proxy, Fore.GREEN, "WebSocket Connected")
 
@@ -499,7 +556,15 @@ class Teneo:
         async with ClientSession(connector=connector) as session:
             async with session.post(url=url,
                                   data=verif_data, headers=headers) as response:
-                return await response.text()
+                verify_response = await response.text()
+                try:
+                    response_data = json.loads(verify_response)
+                    if "access_token" in response_data:
+                        # Сохраняем токен
+                        self.save_account_data(email, token=response_data["access_token"])
+                except:
+                    pass
+                return verify_response
 
     def validate_email_domain(self, email: str) -> tuple[bool, str]:
         """
@@ -571,8 +636,7 @@ class Teneo:
                 try:
                     response_data = json.loads(verify_response)
                     if "access_token" in response_data:
-                        # Сохраняем токен
-                        self.save_token(email, response_data["access_token"])
+                        # Токен сохраняется в методе verify_email
                         self.print_message(email, proxy, Fore.GREEN, "Registration successful")
                         return True
                     else:
@@ -611,6 +675,253 @@ class Teneo:
         
         # Save results
         self.save_results("reg", success_accounts, failed_accounts)
+        return failed_accounts
+
+    async def connect_wallet(self, email: str, token: str, wallet_address: str, private_key: str, proxy=None):
+        """Connects wallet to the account"""
+        try:
+            # Подготовка сообщения для подписи
+            message = f"Permanently link wallet to Teneo account: {email} This can only be done once."
+            
+            # Создание подписи с использованием приватного ключа
+            w3 = Web3()
+            message_hash = encode_defunct(text=message)
+            signed_message = Account.sign_message(message_hash, private_key=private_key)
+            signature = "0x" + signed_message.signature.hex()  # Добавляем префикс 0x к подписи
+            
+            # Подготовка данных для запроса
+            data = json.dumps({
+                "address": wallet_address,
+                "signature": signature,
+                "message": message
+            })
+            
+            url = "https://api.teneo.pro/api/users/link-wallet"
+            headers = {
+                **self.headers,
+                "Authorization": f"Bearer {token}",
+                "Content-Length": str(len(data)),
+                "Content-Type": "application/json"
+            }
+            
+            connector = ProxyConnector.from_url(proxy) if proxy else None
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                async with session.post(url=url, headers=headers, data=data) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    if result.get('status') == 'success' or 'wallet' in result:
+                        # Сохраняем приватный ключ в accounts.json
+                        self.save_account_data(email, private_key=private_key)
+                        self.print_message(email, proxy, Fore.GREEN, f"Wallet {wallet_address} connected successfully")
+                        return True
+                    else:
+                        self.print_message(email, proxy, Fore.RED, f"Failed to connect wallet: {result.get('message', 'Unknown error')}")
+                        return False
+        except Exception as e:
+            self.print_message(email, proxy, Fore.RED, f"Error connecting wallet: {str(e)}")
+            return False
+
+    async def check_wallet_status(self, email: str, token: str, proxy=None):
+        """Проверяет статус привязки кошелька к аккаунту"""
+        try:
+            url = "https://api.teneo.pro/api/users/smart-id-requirements"
+            headers = {
+                **self.headers,
+                "Authorization": f"Bearer {token}"
+            }
+            
+            connector = ProxyConnector.from_url(proxy) if proxy else None
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                async with session.get(url=url, headers=headers) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    
+                    wallet_status = result.get('wallet', False)
+                    heartbeats = result.get('currentHeartbeats', 0)
+                    requirements_met = result.get('requirementsMet', False)
+                    existing_smart_account = result.get('existingSmartAccount', False)
+                    status = result.get('status', 'unknown')
+                    
+                    status_message = (
+                        f"Wallet status: {'Connected' if wallet_status else 'Not connected'}, "
+                        f"Heartbeats: {heartbeats}, "
+                        f"Requirements met: {'Yes' if requirements_met else 'No'}, "
+                        f"Smart Account: {'Exists' if existing_smart_account else 'Not exists'}, "
+                        f"Status: {status}"
+                    )
+                    
+                    self.print_message(email, proxy, Fore.CYAN, status_message)
+                    return result
+                    
+        except Exception as e:
+            self.print_message(email, proxy, Fore.RED, f"Error checking wallet status: {str(e)}")
+            return None
+
+    async def connect_wallet_to_dashboard(self, email: str, token: str, proxy=None):
+        """Connects the linked wallet to the Teneo dashboard"""
+        try:
+            url = "https://api.teneo.pro/api/users/connect-smart-id"
+            headers = {
+                **self.headers,
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            
+            connector = ProxyConnector.from_url(proxy) if proxy else None
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                async with session.post(url=url, headers=headers) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    if result.get('status') == 'success' or result.get('connected') == True:
+                        self.print_message(email, proxy, Fore.GREEN, "Wallet successfully connected to dashboard")
+                        return True
+                    else:
+                        self.print_message(email, proxy, Fore.RED, f"Failed to connect wallet to dashboard: {result.get('message', 'Unknown error')}")
+                        return False
+                    
+        except Exception as e:
+            self.print_message(email, proxy, Fore.RED, f"Error connecting wallet to dashboard: {str(e)}")
+            return False
+
+    async def create_smart_account(self, email: str, token: str, wallet_address: str, private_key: str, proxy=None):
+        """Creates a smart account using the peaq API"""
+        try:
+            # Генерируем nonce (текущее время в миллисекундах)
+            nonce = str(int(datetime.now().timestamp() * 1000))
+            
+            # Подготавливаем сообщение для подписи
+            # Предполагаем, что сообщение включает nonce
+            message = f"Create Teneo Smart Account with nonce: {nonce}"
+            
+            # Подписываем сообщение
+            w3 = Web3()
+            message_hash = encode_defunct(text=message)
+            signed_message = Account.sign_message(message_hash, private_key=private_key)
+            signature = signed_message.signature.hex()
+            
+            # Добавляем префикс 0x, если его нет
+            if not signature.startswith("0x"):
+                signature = "0x" + signature
+            
+            # Подготовка данных для запроса
+            data = json.dumps({
+                "machineOwner": wallet_address.lower(),  # Адрес в нижнем регистре
+                "nonce": nonce,
+                "signature": signature
+            })
+            
+            url = "https://api.teneo.pro/api/peaq/create-smart-account"
+            headers = {
+                **self.headers,
+                "Authorization": f"Bearer {token}",
+                "Content-Length": str(len(data)),
+                "Content-Type": "application/json"
+            }
+            
+            connector = ProxyConnector.from_url(proxy) if proxy else None
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                async with session.post(url=url, headers=headers, data=data) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    if result.get('success') == True:
+                        self.print_message(email, proxy, Fore.GREEN, f"Smart account created successfully. TX Hash: {result.get('txHash', 'N/A')}")
+                        return True
+                    else:
+                        self.print_message(email, proxy, Fore.RED, f"Failed to create smart account: {result.get('message', 'Unknown error')}")
+                        return False
+                    
+        except Exception as e:
+            self.print_message(email, proxy, Fore.RED, f"Error creating smart account: {str(e)}")
+            return False
+
+    async def process_wallet_connection(self, email: str, password: str, wallet_address: str, private_key: str, use_proxy: bool):
+        """Process wallet connection for one account"""
+        proxy = self.get_next_proxy_for_account(email) if use_proxy else None
+        try:
+            # Try to get saved token
+            token = self.get_saved_token(email)
+            
+            # If no token, get it through authorization
+            if not token:
+                self.print_message(email, proxy, Fore.YELLOW, "No saved token, authorizing...")
+                token = await self.get_access_token(email, password, use_proxy)
+                
+            if not token:
+                self.print_message(email, proxy, Fore.RED, "Failed to get token for wallet connection")
+                return False
+                
+            # Проверяем текущий статус кошелька
+            wallet_status = await self.check_wallet_status(email, token, proxy)
+            
+            # Если кошелек уже привязан
+            if wallet_status and wallet_status.get('wallet', False):
+                self.print_message(email, proxy, Fore.GREEN, "Wallet already connected to account")
+                
+                # Проверяем, существует ли уже смарт-аккаунт
+                existing_smart_account = wallet_status.get('existingSmartAccount', False)
+                if existing_smart_account:
+                    self.print_message(email, proxy, Fore.GREEN, "Smart account already exists")
+                    return True
+                
+                # Создаем смарт-аккаунт, если его еще нет
+                self.print_message(email, proxy, Fore.CYAN, "Creating smart account...")
+                return await self.create_smart_account(email, token, wallet_address, private_key, proxy)
+                
+            # Connect wallet
+            wallet_linked = await self.connect_wallet(email, token, wallet_address, private_key, proxy)
+            
+            # Если кошелек успешно привязан, проверяем и создаем смарт-аккаунт при необходимости
+            if wallet_linked:
+                # Повторно проверяем статус после привязки кошелька
+                wallet_status = await self.check_wallet_status(email, token, proxy)
+                
+                # Проверяем, существует ли уже смарт-аккаунт
+                existing_smart_account = wallet_status.get('existingSmartAccount', False)
+                if existing_smart_account:
+                    self.print_message(email, proxy, Fore.GREEN, "Smart account already exists")
+                    return True
+                
+                # Создаем смарт-аккаунт, если его еще нет
+                self.print_message(email, proxy, Fore.CYAN, "Creating smart account...")
+                return await self.create_smart_account(email, token, wallet_address, private_key, proxy)
+                
+            return wallet_linked
+            
+        except Exception as e:
+            self.print_message(email, proxy, Fore.RED, f"Error in wallet connection process: {str(e)}")
+            return False
+            
+    async def process_wallet_batch(self, accounts_batch, use_proxy):
+        """Process a batch of accounts for wallet connection"""
+        tasks = []
+        failed_accounts = []
+        success_accounts = []
+        
+        for account in accounts_batch:
+            email = account.get('Email')
+            password = account.get('Password')
+            wallet = account.get('Wallet')
+            private_key = account.get('PrivateKey')
+            
+            if "@" in email and password and wallet and private_key:
+                tasks.append(self.process_wallet_connection(email, password, wallet, private_key, use_proxy))
+            else:
+                self.log(f"{Fore.RED}Invalid account format for {email}: missing wallet address or private key{Style.RESET_ALL}")
+                failed_accounts.append(account)
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        i = 0
+        for account in accounts_batch:
+            if account.get('Wallet') and account.get('PrivateKey'):  # Обрабатываем только аккаунты с кошельком и приватным ключом
+                if isinstance(results[i], Exception) or not results[i]:
+                    failed_accounts.append(account)
+                elif results[i]:
+                    success_accounts.append(account)
+                i += 1
+        
+        # Save results
+        self.save_results("wallet", success_accounts, failed_accounts)
         return failed_accounts
 
     async def main(self):
@@ -702,6 +1013,55 @@ class Teneo:
                     self.log(f"{Fore.YELLOW}Failed authorizations: {len(failed_accounts)}/{len(accounts)}{Style.RESET_ALL}")
                 else:
                     self.log(f"{Fore.GREEN}All authorizations successful!{Style.RESET_ALL}")
+                return
+            
+            if use_proxy_choice == 4:
+                accounts = self.load_accounts("wallet")
+                if not accounts:
+                    self.log(f"{Fore.RED+Style.BRIGHT}No accounts loaded from data/wallet.txt{Style.RESET_ALL}")
+                    return
+
+                # Проверяем, что есть аккаунты с кошельками
+                accounts_with_wallet = [acc for acc in accounts if acc.get('Wallet')]
+                if not accounts_with_wallet:
+                    self.log(f"{Fore.RED+Style.BRIGHT}No accounts with wallet addresses found. Format should be email:password:wallet{Style.RESET_ALL}")
+                    return
+                
+                use_proxy = True
+                self.clear_terminal()
+                self.welcome()
+                self.log(
+                    f"{Fore.GREEN + Style.BRIGHT}Total accounts for wallet connection: {Style.RESET_ALL}"
+                    f"{Fore.WHITE + Style.BRIGHT}{len(accounts_with_wallet)}{Style.RESET_ALL}"
+                )
+
+                if use_proxy:
+                    await self.load_proxies()
+
+                self.log(f"{Fore.CYAN + Style.BRIGHT}-{Style.RESET_ALL}"*75)
+
+                failed_accounts = []
+                batch_size = min(MAX_AUTH_THREADS, len(accounts_with_wallet))
+                total_batches = (len(accounts_with_wallet) + batch_size - 1) // batch_size
+                total_accounts = len(accounts_with_wallet)
+                
+                self.log(f"{Fore.CYAN}Starting wallet connection for {total_accounts} accounts in batches of {batch_size}{Style.RESET_ALL}")
+                
+                for i in range(0, len(accounts_with_wallet), batch_size):
+                    current_batch = i // batch_size + 1
+                    batch = list(islice(accounts_with_wallet, i, i + batch_size))
+                    accounts_processed = min(i + batch_size, total_accounts)
+                    self.log(
+                        f"{Fore.CYAN}Processing batch {current_batch}/{total_batches} "
+                        f"({len(batch)} accounts, progress: {accounts_processed}/{total_accounts}){Style.RESET_ALL}"
+                    )
+                    batch_failed = await self.process_wallet_batch(batch, use_proxy)
+                    failed_accounts.extend(batch_failed)
+                
+                if failed_accounts:
+                    self.log(f"{Fore.YELLOW}Failed wallet connections: {len(failed_accounts)}/{len(accounts_with_wallet)}{Style.RESET_ALL}")
+                else:
+                    self.log(f"{Fore.GREEN}All wallet connections successful!{Style.RESET_ALL}")
                 return
 
             # Farm mode

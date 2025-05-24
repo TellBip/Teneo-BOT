@@ -8,3 +8,5 @@ anticaptchaofficial
 2captcha-python
 beautifulsoup4
 imap-tools
+web3
+httpx
