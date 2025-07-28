@@ -19,9 +19,37 @@ from eth_account.messages import encode_defunct
 from httpx import AsyncClient
 import base64
 import secrets
+import zendriver
+from selenium_authenticated_proxy import SeleniumAuthenticatedProxy
+from aiohttp.cookiejar import DummyCookieJar
+from patchright.async_api import async_playwright
 
 # Initialize colorama for Windows
 init(autoreset=True)
+
+class BrowserHandler:
+    """Класс для работы с браузером zendriver"""
+    def __init__(self, *, proxy: str = None, headless: bool = True):
+        import zendriver
+        config = zendriver.Config(headless=headless)
+        config.add_argument("--window-size=1200,800")
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+        config.add_argument(f"--user-agent={user_agent}")
+        config.language = "en-US"
+        if hasattr(config, 'add_header'):
+            config.add_header("Accept-Language", "en-US,en;q=0.9")
+        if proxy:
+            from selenium_authenticated_proxy import SeleniumAuthenticatedProxy
+            auth_proxy = SeleniumAuthenticatedProxy(proxy)
+            auth_proxy.enrich_chrome_options(config)
+        self.driver = zendriver.Browser(config)
+
+    async def __aenter__(self):
+        await self.driver.start()
+        return self
+
+    async def __aexit__(self, *args):
+        await self.driver.stop()
 
 class Teneo:
     def __init__(self) -> None:
@@ -261,29 +289,31 @@ class Teneo:
                 print("2. Authorization")
                 print("3. Farm")
                 print("4. Wallet Connection & Creating smart account")
-                print("5. Exit")
-                choose = int(input("Choose action [1/2/3/4/5] -> ").strip())
+                #print("5. Connect Twitter")
+                print("6. Exit")
+                choose = int(input("Choose action [1/2/3/4/5/6] -> ").strip())
 
-                if choose in [1, 2, 3, 4, 5]:
-                    if choose == 5:
+                if choose in [1, 2, 3, 4, 5, 6]:
+                    if choose == 6:
                         print(f"{Fore.RED + Style.BRIGHT}Exiting program...{Style.RESET_ALL}")
-                        exit(0)  # Завершаем программу
+                        exit(0)  # Exit program
                         
                     action_type = (
                         "Registration" if choose == 1 else 
                         "Authorization" if choose == 2 else 
                         "Farm" if choose == 3 else
-                        "Wallet Connection & Creating smart account"
+                        "Wallet Connection & Creating smart account" if choose == 4 else
+                        "Connect Twitter"
                     )
                     print(f"{Fore.GREEN + Style.BRIGHT}Selected: {action_type}{Style.RESET_ALL}")
                     return choose
                 else:
-                    print(f"{Fore.RED + Style.BRIGHT}Please enter a number from 1 to 5.{Style.RESET_ALL}")
+                    print(f"{Fore.RED + Style.BRIGHT}Please enter a number from 1 to 6.{Style.RESET_ALL}")
             except ValueError:
-                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1, 2, 3, 4 or 5).{Style.RESET_ALL}")
+                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1, 2, 3, 4, 5 or 6).{Style.RESET_ALL}")
     
     def save_account_data(self, email: str, token: str = None, private_key: str = None):
-        """Сохраняет данные аккаунта (токен, приватный ключ) в accounts.json файл"""
+        """Saves account data (token, private key) to accounts.json file"""
         try:
             data = {}
             if os.path.exists('data/accounts.json'):
@@ -347,14 +377,14 @@ class Teneo:
             "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
             "Cache-Control": "no-cache",
             "Connection": "Upgrade",
-            "Host": "secure.ws.teneo.pro",
+            "Accept-Encoding":	"gzip, deflate, br, zstd",
             "Origin": "chrome-extension://emcclcoaglgcpoognfiggmhnhgabppkm",
             "Pragma": "no-cache",
             "Sec-WebSocket-Extensions": "permessage-deflate; client_max_window_bits",
-            "Sec-WebSocket-Key": base64.b64encode(secrets.token_bytes(16)).decode(),
+            #"Sec-WebSocket-Key": base64.b64encode(secrets.token_bytes(16)).decode(),
             "Sec-WebSocket-Version": "13",
             "Upgrade": "websocket",
-            "User-Agent": FakeUserAgent().random
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
         }
         send_ping = None
 
@@ -369,6 +399,7 @@ class Teneo:
                     
                     async with session.ws_connect(wss_url, headers=headers) as wss:
                         self.print_message(email, proxy, Fore.GREEN, "WebSocket Connected")
+                        ping_task = None
 
                         async def send_ping_message():
                             while True:
@@ -382,13 +413,15 @@ class Teneo:
                                 )
                                 await asyncio.sleep(10)
 
-                        if send_ping is None or send_ping.done():
-                            send_ping = asyncio.create_task(send_ping_message())
-
                         async for msg in wss:
                             try:
                                 response = json.loads(msg.data)
-                                if response.get("message") == "Connected successfully":
+                                if response.get("message") == "Connected! Loading your points...":
+                                    self.print_message(
+                                        email, proxy, Fore.GREEN, 
+                                        f"Received message: Connected! Loading your points..."
+                                    )
+                                elif response.get("message") == "Points loaded successfully":
                                     today_point = response.get("pointsToday", 0)
                                     total_point = response.get("pointsTotal", 0)
                                     self.print_message(
@@ -400,6 +433,8 @@ class Teneo:
                                         f"{Fore.MAGENTA + Style.BRIGHT} - {Style.RESET_ALL}"
                                         f"{Fore.WHITE + Style.BRIGHT}Total {total_point} PTS{Style.RESET_ALL}"
                                     )
+                                    if ping_task is None or ping_task.done():
+                                        ping_task = asyncio.create_task(send_ping_message())
 
                                 elif response.get("message") == "Pulse from server":
                                     today_point = response.get("pointsToday", 0)
@@ -418,14 +453,18 @@ class Teneo:
                                         f"{Fore.WHITE + Style.BRIGHT}Today {heartbeat_today} HB{Style.RESET_ALL}"
                                     )
                                 else:
-                                    raise Exception("Connection Timed Out")
+                                    # Log unknown messages instead of closing the connection
+                                    self.print_message(
+                                        email, proxy, Fore.YELLOW, 
+                                        f"Unknown message: {response.get('message', 'No message in response')}"
+                                    )
 
                             except Exception as e:
                                 self.print_message(email, proxy, Fore.RED, f"WebSocket Connection Closed: {Fore.YELLOW + Style.BRIGHT}{str(e)}")
-                                if send_ping and not send_ping.done():
-                                    send_ping.cancel()
+                                if ping_task and not ping_task.done():
+                                    ping_task.cancel()
                                     try:
-                                        await send_ping
+                                        await ping_task
                                     except asyncio.CancelledError:
                                         self.print_message(email, proxy, Fore.YELLOW, f"Send Ping Cancelled")
 
@@ -982,6 +1021,260 @@ class Teneo:
         self.save_results("wallet", success_accounts, failed_accounts)
         return failed_accounts
 
+    async def get_isppaccepted(self):
+        """
+        Делает GET-запрос к https://api.teneo.pro/api/users/isppaccepted и возвращает результат.
+        """
+        url = "https://api.teneo.pro/api/users/isppaccepted"
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=30)) as session:
+                async with session.get(url) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    self.log(f"Ответ от /isppaccepted: {result}")
+                    return result
+        except Exception as e:
+            self.log(f"{Fore.RED}Ошибка при запросе /isppaccepted: {e}{Style.RESET_ALL}")
+            return None
+
+    def load_twitter_accounts(self):
+        """
+        Загружает аккаунты из data/twitter.txt в формате login:pass:private_key:twitter_token
+        Возвращает список словарей с ключами: Email, Password, PrivateKey, TwitterToken
+        """
+        filename = "data/twitter.txt"
+        try:
+            if not os.path.exists(filename):
+                self.log(f"{Fore.RED}File '{filename}' not found.{Style.RESET_ALL}")
+                return []
+            accounts = []
+            with open(filename, 'r', encoding='utf-8') as file:
+                for line in file:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(':', 3)
+                    if len(parts) == 4:
+                        email, password, private_key, twitter_token = parts
+                        accounts.append({
+                            "Email": email.strip(),
+                            "Password": password.strip(),
+                            "PrivateKey": private_key.strip(),
+                            "TwitterToken": twitter_token.strip()
+                        })
+                    else:
+                        self.log(f"{Fore.YELLOW}Некорректная строка в twitter.txt: {line}{Style.RESET_ALL}")
+            return accounts
+        except Exception as e:
+            self.log(f"{Fore.RED}Error loading accounts from {filename}: {e}{Style.RESET_ALL}")
+            return []
+
+    async def get_cookies_with_zendriver(self, url: str, proxy: str = None, headless: bool = False) -> dict:
+        """
+        Открывает браузер через zendriver с прокси, ждет 10 секунд полной загрузки, затем собирает cookies для указанного url и возвращает их в виде dict.
+        Можно указать user_agent.
+        """
+        cookies = {}
+        try:
+            async with BrowserHandler(proxy=proxy, headless=headless) as browser:
+                tab = browser.driver.main_tab
+                await tab.get(url)
+                await tab.sleep(10)  # Ждем полной загрузки страницы
+                try:
+                    all_cookies = await tab.driver.cookies.get_all()
+                except Exception:
+                    all_cookies = await browser.driver.cookies.get_all()
+                for c in all_cookies:
+                    if isinstance(c, dict):
+                        cookies[c.get('name')] = c.get('value')
+                    else:
+                        cookies[getattr(c, 'name', None)] = getattr(c, 'value', None)
+                self.log(f"{Fore.GREEN}Получены cookies для {url}: {list(cookies.keys())}{Style.RESET_ALL}")
+        except Exception as e:
+            self.log(f"{Fore.RED}Ошибка при получении cookies через zendriver: {e}{Style.RESET_ALL}")
+        return cookies
+
+    async def get_vercel_challenge_with_playwright(self, user_agent: str, proxy: str = None) -> dict:
+        """
+        Открывает браузер через playwright, переходит на https://extra-points.teneo.pro/follow-us-on-x/?page_number=0,
+        перехватывает challenge-заголовки (x-vercel-challenge-token, x-vercel-challenge-solution, x-vercel-challenge-version)
+        и возвращает их в виде словаря.
+        """
+        import asyncio
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                channel='chrome',
+                headless=False,
+                proxy={"server": proxy} if proxy else None,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            page = await browser.new_page(user_agent=user_agent)
+            challenge_data = {}
+            challenge_future = asyncio.get_event_loop().create_future()
+
+            async def handle_request(request):
+                if 'request-challenge' in request.url:
+                    headers = request.headers
+                    challenge_data['token'] = headers.get('x-vercel-challenge-token')
+                    challenge_data['solution'] = headers.get('x-vercel-challenge-solution')
+                    challenge_data['version'] = headers.get('x-vercel-challenge-version')
+                    if not challenge_future.done():
+                        challenge_future.set_result(True)
+
+            page.on('request', handle_request)
+            await page.goto('https://extra-points.teneo.pro/follow-us-on-x/?page_number=0', wait_until='domcontentloaded')
+            try:
+                await asyncio.wait_for(challenge_future, timeout=30)
+            except asyncio.TimeoutError:
+                await browser.close()
+                raise Exception('Challenge params not found (timeout)')
+            await browser.close()
+            self.log(f"[Playwright] Перехвачены challenge-заголовки: token={challenge_data.get('token')}, solution={challenge_data.get('solution')}, version={challenge_data.get('version')}")
+            return challenge_data
+
+    async def get_isppaccepted_with_token(self, token, email=None, proxy=None):
+        """
+        Делает GET-запрос к https://api.teneo.pro/api/users/isppaccepted с авторизацией по токену и поддержкой прокси.
+        Если isppAccepted: False — делает POST-запрос к /api/users/accept-pp, затем GET к follow-us-on-x.
+        """
+        if email:
+            token = self.get_saved_token(email)
+            if token:
+                token = token.strip()
+                self.log(f"{Fore.YELLOW}Токен для {email} загружен из accounts.json (длина: {len(token)}){Style.RESET_ALL}")
+            else:
+                self.log(f"{Fore.RED}Токен для {email} не найден в accounts.json! Пропуск...{Style.RESET_ALL}")
+                return None
+        else:
+            self.log(f"{Fore.RED}Email не передан для поиска токена! Пропуск...{Style.RESET_ALL}")
+            return None
+        url = "https://api.teneo.pro/api/users/isppaccepted"
+        headers = {
+            **self.headers,
+            "Authorization": f"Bearer {token}"
+        }
+        try:
+            connector = ProxyConnector.from_url(proxy) if proxy else None
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=30)) as session:
+                async with session.get(url, headers=headers) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    self.log(f"Ответ от /isppaccepted для {email or ''}: {result}")
+                    if isinstance(result, dict) and result.get('isppAccepted') is False:
+                        # Делаем POST-запрос accept-pp
+                        post_url = "https://api.teneo.pro/api/users/accept-pp"
+                        async with session.post(post_url, headers=headers, json={}) as post_response:
+                            post_response.raise_for_status()
+                            post_result = await post_response.json()
+                            self.log(f"POST /accept-pp для {email or ''}: {post_result}")
+                    # Получаем cookies через zendriver перед запросом
+                    cookies = await self.get_cookies_with_zendriver("https://extra-points.teneo.pro", proxy)
+                    # Формируем строку Cookie для заголовка из всех cookies
+                                        # После этого делаем GET к follow-us-on-x
+                    vcrcs = cookies.get("_vcrcs")
+                    if vcrcs:
+                        vcrcs = vcrcs.replace('"', '').replace("'", '')
+
+
+                    follow_url = "https://extra-points.teneo.pro/follow-us-on-x/?page_number=0"
+                    follow_headers = {
+                        "Connection": "keep-alive",
+                        "Cache-Control": "max-age=0",
+                        "sec-ch-ua": '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": '"Windows"',
+                        "Upgrade-Insecure-Requests": "1",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                        "Sec-Fetch-Site": "same-origin",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-Dest": "document",
+                        "Referer": follow_url,
+                        "Accept-Encoding": "gzip, deflate, br, zstd",
+                        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+                    }
+                    
+                    if vcrcs:
+                        follow_headers["Cookie"] = f"_vcrcs={vcrcs}"
+                    # Используем отдельную сессию без cookie_jar и НЕ передаем параметр cookies!
+                    async with ClientSession(connector=connector, timeout=ClientTimeout(total=30)) as session2:
+                        async with session2.get(follow_url, headers=follow_headers) as follow_response:
+                            follow_response.raise_for_status()
+                            follow_result = await follow_response.json()
+                            self.log(f"GET /follow-us-on-x для {email or ''}: {follow_result}")
+                    return result
+                
+                    cookies = await self.get_vercel_challenge_with_playwright("https://extra-points.teneo.pro/follow-us-on-x/?page_number=0", proxy)
+                    token = cookies.get("token")
+                    version = cookies.get("version")
+                    solution = cookies.get("solution")
+                    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+                    url = "https://extra-points.teneo.pro/.well-known/vercel/security/request-challenge"
+                    headers = {
+                        "Host": "extra-points.teneo.pro",
+                        "Connection": "keep-alive",
+                        #"Content-Length": "0",
+                        "x-vercel-challenge-token": token,
+                        "x-vercel-challenge-version": version,
+                        "x-vercel-challenge-solution": solution,
+                        "User-Agent": user_agent,
+                        #"DNT": "1",
+                        "Accept": "*/*",
+                        "Origin": "https://extra-points.teneo.pro",
+                        "Sec-Fetch-Site": "same-origin",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Dest": "empty",
+                        "Referer": "https://extra-points.teneo.pro/.well-known/vercel/security/static/challenge.v2.min.js",
+                        "Accept-Encoding": "gzip, deflate, br, zstd",
+                        "Accept-Language": "ru-RU,ru;q=0.9",
+                        # Удалён лишний Content-Type
+                    }
+
+                    async with ClientSession(connector=connector,cookie_jar=DummyCookieJar()) as session:
+                        async with session.post(url, headers=headers, data=b"") as resp:
+                            text = await resp.text()
+                            print(f"Status: {resp.status}")
+                            print(f"Response: {text}")
+                            print(f"cookies: {resp.cookies}")
+                    
+        except Exception as e:
+            self.log(f"{Fore.RED}Ошибка при запросе /isppaccepted для {email or ''}: {e}{Style.RESET_ALL}")
+            return None
+
+    async def process_twitter_batch(self, accounts_batch, use_proxy):
+        """
+        Обрабатывает пакет аккаунтов из twitter.txt: делает get-запрос с токеном и прокси, собирает неудачные.
+        Если токен не найден — пробует получить его через get_access_token (как в других режимах).
+        """
+        tasks = []
+        failed_accounts = []
+        success_accounts = []
+        for account in accounts_batch:
+            email = account.get("Email")
+            password = account.get("Password")
+            token = account.get("TwitterToken")
+            if not token:
+                token = self.get_saved_token(email)
+            proxy = self.get_next_proxy_for_account(email) if use_proxy else None
+            if not token:
+                if password:
+                    self.log(f"{Fore.YELLOW}Пробую получить токен для {email} через авторизацию...{Style.RESET_ALL}")
+                    token = await self.get_access_token(email, password, use_proxy)
+                if not token:
+                    self.log(f"{Fore.RED}Токен для {email} не найден и не удалось получить через авторизацию! Пропуск...{Style.RESET_ALL}")
+                    failed_accounts.append(account)
+                    continue
+            tasks.append(self.get_isppaccepted_with_token(token, email, proxy))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for account, result in zip(accounts_batch, results):
+            if isinstance(result, Exception) or not result:
+                failed_accounts.append(account)
+            else:
+                success_accounts.append(account)
+        return failed_accounts
+
     async def main(self):
         try:
             self.welcome()
@@ -1120,6 +1413,38 @@ class Teneo:
                     self.log(f"{Fore.YELLOW}Failed wallet connections: {len(failed_accounts)}/{len(accounts_with_wallet)}{Style.RESET_ALL}")
                 else:
                     self.log(f"{Fore.GREEN}All wallet connections successful!{Style.RESET_ALL}")
+                return
+
+            if use_proxy_choice == 5:
+                self.clear_terminal()
+                self.welcome()
+                self.log(f"{Fore.GREEN + Style.BRIGHT}Connect Twitter mode selected.{Style.RESET_ALL}")
+                accounts = self.load_twitter_accounts()
+                if not accounts:
+                    self.log(f"{Fore.RED}No accounts in data/twitter.txt{Style.RESET_ALL}")
+                    return
+                use_proxy = True
+                await self.load_proxies()
+                self.log(f"{Fore.CYAN + Style.BRIGHT}-{Style.RESET_ALL}"*75)
+                failed_accounts = []
+                batch_size = min(MAX_AUTH_THREADS, len(accounts))
+                total_batches = (len(accounts) + batch_size - 1) // batch_size
+                total_accounts = len(accounts)
+                self.log(f"{Fore.CYAN}Starting Twitter check for {total_accounts} accounts in batches of {batch_size}{Style.RESET_ALL}")
+                for i in range(0, len(accounts), batch_size):
+                    current_batch = i // batch_size + 1
+                    batch = list(islice(accounts, i, i + batch_size))
+                    accounts_processed = min(i + batch_size, total_accounts)
+                    self.log(
+                        f"{Fore.CYAN}Processing batch {current_batch}/{total_batches} "
+                        f"({len(batch)} accounts, progress: {accounts_processed}/{total_accounts}){Style.RESET_ALL}"
+                    )
+                    batch_failed = await self.process_twitter_batch(batch, use_proxy)
+                    failed_accounts.extend(batch_failed)
+                if failed_accounts:
+                    self.log(f"{Fore.YELLOW}Failed Twitter checks: {len(failed_accounts)}/{len(accounts)}{Style.RESET_ALL}")
+                else:
+                    self.log(f"{Fore.GREEN}All Twitter checks successful!{Style.RESET_ALL}")
                 return
 
             # Farm mode
