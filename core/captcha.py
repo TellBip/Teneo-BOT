@@ -1,13 +1,15 @@
 import asyncio
 import re
 from typing import Optional
-from capmonster_python import TurnstileTask
+from capmonster_python import TurnstileTask, RecaptchaV2Task
 from twocaptcha import TwoCaptcha
 from httpx import AsyncClient
 from core.config.config import (
     CFLSOLVER_BASE_URL,
     CAPTCHA_WEBSITE_KEY,
-    CAPTCHA_WEBSITE_URL
+    CAPTCHA_WEBSITE_URL,
+    CAPTCHA_WEBSITE_KEY2,
+    CAPTCHA_WEBSITE_URL2
 )
 
 class ServiceCapmonster:
@@ -28,8 +30,26 @@ class ServiceCapmonster:
     async def solve_captcha(self):
         return await self.get_captcha_token_async()
 
-from anticaptchaofficial.turnstileproxyless import *
+class ServiceCapmonster2:
+    def __init__(self, api_key):
+        self.capmonster = RecaptchaV2Task(api_key)
 
+    def get_captcha_token(self):
+        task_id = self.capmonster.create_task(
+            website_key=CAPTCHA_WEBSITE_KEY2,
+            website_url=CAPTCHA_WEBSITE_URL2
+        )
+        return self.capmonster.join_task_result(task_id).get("token")
+
+    async def get_captcha_token_async(self):
+        return await asyncio.to_thread(self.get_captcha_token)
+
+    # Add alias for compatibility
+    async def solve_captcha(self):
+        return await self.get_captcha_token_async()
+    
+from anticaptchaofficial.turnstileproxyless import *
+from anticaptchaofficial.recaptchav2proxyless import *
 class ServiceAnticaptcha:
     def __init__(self, api_key):
         self.api_key = api_key
@@ -50,12 +70,50 @@ class ServiceAnticaptcha:
     # Add alias for compatibility
     async def solve_captcha(self):
         return await self.get_captcha_token_async()
+    
+class ServiceAnticaptcha2:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.solver = recaptchaV2Proxyless()
+        self.solver.set_verbose(1)
+        self.solver.set_key(self.api_key)
+        self.solver.set_website_url(CAPTCHA_WEBSITE_URL2)    
+        self.solver.set_website_key(CAPTCHA_WEBSITE_KEY2)
+    
+    def get_captcha_token(self):
+        captcha_token = self.solver.solve_and_return_solution()
+        return captcha_token
 
+    async def get_captcha_token_async(self):
+        return await asyncio.to_thread(self.get_captcha_token)
+
+    # Add alias for compatibility
+    async def solve_captcha(self):
+        return await self.get_captcha_token_async()
+    
 class Service2Captcha:
     def __init__(self, api_key):
         self.solver = TwoCaptcha(api_key)
     def get_captcha_token(self):
         captcha_token = self.solver.turnstile(sitekey=CAPTCHA_WEBSITE_KEY, url=CAPTCHA_WEBSITE_URL)
+
+        if 'code' in captcha_token:
+            captcha_token = captcha_token['code']
+
+        return captcha_token
+
+    async def get_captcha_token_async(self):
+        return await asyncio.to_thread(self.get_captcha_token)
+
+    # Add alias for compatibility
+    async def solve_captcha(self):
+        return await self.get_captcha_token_async()
+    
+class Service2Captcha2:
+    def __init__(self, api_key):
+        self.solver = TwoCaptcha(api_key)
+    def get_captcha_token(self):
+        captcha_token = self.solver.recaptcha(sitekey=CAPTCHA_WEBSITE_KEY2, url=CAPTCHA_WEBSITE_URL2)
 
         if 'code' in captcha_token:
             captcha_token = captcha_token['code']
@@ -89,7 +147,7 @@ class CFLSolver:
         return f"http://{proxy}"
 
     async def create_turnstile_task(self, sitekey: str, pageurl: str) -> Optional[str]:
-        """Создает задачу для решения Turnstile капчи с использованием локального API сервера"""
+        """Creates task for solving Turnstile captcha using local API server"""
         url = f"{self.base_url}/turnstile?url={pageurl}&sitekey={sitekey}"
 
         try:
@@ -108,7 +166,7 @@ class CFLSolver:
             return None
 
     async def get_task_result(self, task_id: str) -> Optional[str]:
-        """Получает результат решения капчи с локального API сервера"""
+        """Gets captcha solution result from local API server"""
         max_attempts = 30
         for attempt in range(max_attempts):
             try:
@@ -151,7 +209,7 @@ class CFLSolver:
         return None
 
     async def solve_captcha(self) -> Optional[str]:
-        """Решает Cloudflare Turnstile капчу и возвращает токен используя локальный API сервер"""
+        """Solves Cloudflare Turnstile captcha and returns token using local API server"""
         task_id = await self.create_turnstile_task(
             CAPTCHA_WEBSITE_KEY, 
             CAPTCHA_WEBSITE_URL
@@ -161,6 +219,6 @@ class CFLSolver:
 
         return await self.get_task_result(task_id)
 
-    # Добавляем алиас для совместимости
+    # Add alias for compatibility
     async def get_captcha_token_async(self):
         return await self.solve_captcha()

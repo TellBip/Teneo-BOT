@@ -83,7 +83,17 @@
    ```
    Where `private_key` is the Ethereum private key to connect to each account.
 
-6. **proxy.txt:** Create `data/proxy.txt` with your proxies in the following format:
+6. **Twitter accounts:** Create `data/twitter.txt` for Twitter connection and X campaign claiming with format:
+   ```
+   email1@example.com:password1:private_key1:twitter_token1
+   email2@example.com:password2:private_key2:twitter_token2
+   ```
+   Where:
+   - `email` and `password` are your Teneo account credentials
+   - `private_key` is the Ethereum private key for wallet signature
+   - `twitter_token` is your Twitter authentication token
+
+7. **proxy.txt:** Create `data/proxy.txt` with your proxies in the following format:
    ```
    ip:port # Default Protocol HTTP
    protocol://ip:port
@@ -91,7 +101,7 @@
    ```
    Supported protocols: http, https, socks4, socks5
 
-7. **config.py:** Configure captcha service and threads in `core/config/config.py`:
+8. **config.py:** Configure captcha service and threads in `core/config/config.py`:
    ```python
    # Captcha service settings
    CAPTCHA_SERVICE = "2captcha"  # Available: 2captcha, capmonster, anticaptcha, cflsolver
@@ -103,7 +113,7 @@
    INVITE_CODE = "Svaag" # Referral code
    ```
 
-8. **mail_config.py:** Configure email settings in `core/config/mail_config.py` for supported email domains.
+9. **mail_config.py:** Configure email settings in `core/config/mail_config.py` for supported email domains.
 
 ## Usage
 
@@ -112,7 +122,7 @@ Run the bot:
 python bot.py #or python3 bot.py
 ```
 
-The bot has 5 modes:
+The bot has 6 modes:
 
 1. **Registration**
    - Supports automatic email verification
@@ -139,7 +149,17 @@ The bot has 5 modes:
    - Saves successful connections to result/good_wallet.txt
    - Saves failed connections to result/bad_wallet.txt
 
-5. **Exit**
+5. **Connect Twitter & Claim X Campaign**
+   - Connects Twitter accounts to Teneo platform
+   - Automatically claims X campaign rewards
+   - Uses accounts from data/twitter.txt (format: email:password:private_key:twitter_token)
+   - Requires wallet signature for form submission
+   - Automatically authorizes accounts if needed
+   - Saves successful operations to result/good_twitter.txt
+   - Saves failed operations to result/bad_twitter.txt
+   - Saves detailed error logs to result/error_twitter.txt
+
+6. **Exit**
    - Exits the program
 
 ## Results
@@ -153,12 +173,15 @@ The bot creates a `result` folder with the following files:
 - bad_farm.txt: Failed farming attempts
 - good_wallet.txt: Successfully connected wallets
 - bad_wallet.txt: Failed wallet connections
+- good_twitter.txt: Successfully connected Twitter accounts
+- bad_twitter.txt: Failed Twitter connection attempts
+- error_twitter.txt: Detailed Twitter operation error logs
 
 Tokens and wallet private keys are stored in `data/accounts.json` for future use.
 
 ## Telegram
 
-Join our Telegram channel: http://t.me/+1fc0or8gCHsyNGFi
+Join our Telegram channel: http://t.me/cry_batya
 
 Thank you for visiting this repository, don't forget to contribute in the form of follows and stars.
 If you have questions, find an issue, or have suggestions for improvement, feel free to contact me or open an *issue* in this GitHub repository.

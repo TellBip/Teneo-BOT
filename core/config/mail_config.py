@@ -1,5 +1,5 @@
 """
-Конфигурация почтовых настроек.
+Mail configuration settings.
 """
 from dataclasses import dataclass, field
 from typing import Dict, Set
@@ -7,7 +7,7 @@ from typing import Dict, Set
 
 @dataclass
 class MailConfig:
-    """Настройки для работы с почтой."""
+    """Settings for working with mail."""
 
     IMAP_SETTINGS: Dict[str, str] = field(default_factory=lambda: {
         # Standard email providers
@@ -57,5 +57,5 @@ class MailConfig:
     ALLOWED_DOMAINS: Set[str] = field(default_factory=lambda: set())
 
     def __post_init__(self) -> None:
-        """Инициализация после создания объекта."""
+        """Initialization after object creation."""
         self.ALLOWED_DOMAINS = set(self.IMAP_SETTINGS.keys()) 

@@ -9,8 +9,31 @@ from datetime import datetime
 from colorama import *
 from core.config.config import CAPTCHA_SERVICE, CAPTCHA_API_KEY, MAX_AUTH_THREADS, MAX_REG_THREADS, INVITE_CODE
 from core.config.mail_config import MailConfig
-from core.captcha import ServiceCapmonster, ServiceAnticaptcha, Service2Captcha, CFLSolver
+from core.captcha import ServiceCapmonster, ServiceAnticaptcha, Service2Captcha, CFLSolver, Service2Captcha2, ServiceCapmonster2, ServiceAnticaptcha2
+from core.utils.accounts import (
+    load_accounts as load_accounts_util,
+    save_results as save_results_util,
+    save_account_data as save_account_data_util,
+    get_saved_token as get_saved_token_util,
+)
 from core.mail import check_if_email_valid, check_email_for_code
+from core.services import auth as auth_service
+from core.services import wallet as wallet_service
+from core.services import campaigns as campaign_service
+from core.utils.crypto import sign_siwe_for_form
+from core.clients.teneo_api import (
+    login as teneo_login,
+    signup as teneo_signup,
+    verify_email as teneo_verify_email,
+    smart_id_requirements as teneo_smart_id_requirements,
+    link_wallet as teneo_link_wallet,
+    create_smart_account as teneo_create_smart_account,
+    connect_smart_id as teneo_connect_smart_id,
+    isppaccepted as teneo_isppaccepted,
+    accept_pp as teneo_accept_pp,
+    get_campaigns as teneo_get_campaigns,
+    claim_submission as teneo_claim_submission,
+)
 import asyncio, json, os
 from itertools import islice
 from web3 import Web3
@@ -19,37 +42,16 @@ from eth_account.messages import encode_defunct
 from httpx import AsyncClient
 import base64
 import secrets
-import zendriver
-from selenium_authenticated_proxy import SeleniumAuthenticatedProxy
-from aiohttp.cookiejar import DummyCookieJar
-from patchright.async_api import async_playwright
+import hashlib
+import uuid
+from Jam_Twitter_API.account_sync import TwitterAccountSync
+from Jam_Twitter_API.errors import TwitterAccountSuspended, TwitterError, IncorrectData, RateLimitError
+from core.services import twitter as twitter_service
 
 # Initialize colorama for Windows
 init(autoreset=True)
 
-class BrowserHandler:
-    """Класс для работы с браузером zendriver"""
-    def __init__(self, *, proxy: str = None, headless: bool = True):
-        import zendriver
-        config = zendriver.Config(headless=headless)
-        config.add_argument("--window-size=1200,800")
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
-        config.add_argument(f"--user-agent={user_agent}")
-        config.language = "en-US"
-        if hasattr(config, 'add_header'):
-            config.add_header("Accept-Language", "en-US,en;q=0.9")
-        if proxy:
-            from selenium_authenticated_proxy import SeleniumAuthenticatedProxy
-            auth_proxy = SeleniumAuthenticatedProxy(proxy)
-            auth_proxy.enrich_chrome_options(config)
-        self.driver = zendriver.Browser(config)
 
-    async def __aenter__(self):
-        await self.driver.start()
-        return self
-
-    async def __aexit__(self, *args):
-        await self.driver.stop()
 
 class Teneo:
     def __init__(self) -> None:
@@ -61,7 +63,7 @@ class Teneo:
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-site",
-            "User-Agent": FakeUserAgent().random,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
             "X-Api-Key": "OwAG3kib1ivOJG4Y0OCZ8lJETa6ypvsDtGmdhcjB"
         }
         self.proxies = []
@@ -73,10 +75,13 @@ class Teneo:
         # Captcha service initialization
         if CAPTCHA_SERVICE.lower() == "2captcha":
             self.captcha_solver = Service2Captcha(CAPTCHA_API_KEY)
-        elif CAPTCHA_SERVICE.lower() == "capmonster":
+            self.captcha_solver2 = Service2Captcha2(CAPTCHA_API_KEY)
+        elif CAPTCHA_SERVICE.lower() == "capmonster":   
             self.captcha_solver = ServiceCapmonster(CAPTCHA_API_KEY)
+            self.captcha_solver2 = ServiceCapmonster2(CAPTCHA_API_KEY)
         elif CAPTCHA_SERVICE.lower() == "anticaptcha":
             self.captcha_solver = ServiceAnticaptcha(CAPTCHA_API_KEY)
+            self.captcha_solver2 = ServiceAnticaptcha2(CAPTCHA_API_KEY)
         elif CAPTCHA_SERVICE.lower() == "cflsolver":
             self.http_client = AsyncClient()
             self.captcha_solver = CFLSolver(CAPTCHA_API_KEY, self.http_client)
@@ -85,13 +90,13 @@ class Teneo:
 
 
     async def start(self):
-        """Инициализация сессии"""
+        """Initialize session"""
         if self.session is None:
             self.session = ClientSession()
         return self
 
     async def stop(self):
-        """Закрытие сессии"""
+        """Close session"""
         if self.session:
             await self.session.close()
             self.session = None
@@ -107,7 +112,7 @@ class Teneo:
         )
 
     def welcome(self):
-        telegram_link = "https://t.me/+1fc0or8gCHsyNGFi"
+        telegram_link = "https://t.me/cry_batya"
         print(f"""
         {Fore.GREEN + Style.BRIGHT}
         TTTTTT EEEE N   N EEEE  OOO  
@@ -126,97 +131,16 @@ class Teneo:
         return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
     
     def load_accounts(self, operation_type: str = None):
-        """Load accounts based on operation type (reg/auth/farm/wallet)"""
-        filename = {
-            "reg": "data/reg.txt",
-            "auth": "data/auth.txt",
-            "farm": "data/farm.txt",
-            "wallet": "data/wallet.txt"
-        }.get(operation_type, "data/accounts.txt")
-
+        """Load accounts through utility module (supports reg/auth/farm/wallet/twitter)."""
         try:
-            if not os.path.exists(filename):
-                self.log(f"{Fore.RED}File '{filename}' not found.{Style.RESET_ALL}")
-                return []
-            accounts = []
-            with open(filename, 'r', encoding='utf-8') as file:
-                for line in file:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    parts = line.split(':', 2)  # Максимум 3 части
-                    
-                    if operation_type == "wallet" and len(parts) == 3:
-                        # Формат login:pass:privatekey для wallet.txt
-                        email, password, private_key = parts
-                        # Получаем адрес кошелька из приватного ключа
-                        try:
-                            account = Account.from_key(private_key)
-                            wallet_address = account.address
-                            accounts.append({
-                                "Email": email.strip(), 
-                                "Password": password.strip(), 
-                                "PrivateKey": private_key.strip(),
-                                "Wallet": wallet_address
-                            })
-                        except Exception as e:
-                            self.log(f"{Fore.RED}Error deriving wallet address from private key for {email}: {e}{Style.RESET_ALL}")
-                    elif len(parts) >= 2:
-                        # Стандартный формат login:pass
-                        email, password = parts[0], parts[1]
-                        accounts.append({"Email": email.strip(), "Password": password.strip()})
-            return accounts
+            return load_accounts_util(operation_type, log=self.log)
         except Exception as e:
-            self.log(f"{Fore.RED}Error loading accounts from {filename}: {e}{Style.RESET_ALL}")
+            self.log(f"{Fore.RED}Error loading accounts: {e}{Style.RESET_ALL}")
             return []
 
     def save_results(self, operation_type: str, success_accounts: list, failed_accounts: list):
-        """Save operation results to appropriate files"""
-        try:
-            if not os.path.exists('result'):
-                os.makedirs('result')
-
-            # Define filenames based on operation type
-            success_file = {
-                "reg": "result/good_reg.txt",
-                "auth": "result/good_auth.txt",
-                "farm": "result/good_farm.txt",
-                "wallet": "result/good_wallet.txt"
-            }.get(operation_type)
-
-            failed_file = {
-                "reg": "result/bad_reg.txt",
-                "auth": "result/bad_auth.txt",
-                "farm": "result/bad_farm.txt",
-                "wallet": "result/bad_wallet.txt"
-            }.get(operation_type)
-
-            # Всегда используем режим добавления (append) для всех типов операций
-            file_mode = 'a'
-
-            # Save successful accounts
-            if success_accounts and success_file:
-                with open(success_file, file_mode, encoding='utf-8') as f:
-                    for account in success_accounts:
-                        if operation_type == "wallet" and "PrivateKey" in account:
-                            f.write(f"{account['Email']}:{account['Password']}:{account['PrivateKey']}\n")
-                        else:
-                            f.write(f"{account['Email']}:{account['Password']}\n")
-                self.log(f"{Fore.GREEN}Successful accounts saved to {success_file}{Style.RESET_ALL}")
-
-            # Save failed accounts
-            if failed_accounts and failed_file:
-                with open(failed_file, file_mode, encoding='utf-8') as f:
-                    for account in failed_accounts:
-                        if operation_type == "wallet" and "PrivateKey" in account:
-                            f.write(f"{account['Email']}:{account['Password']}:{account['PrivateKey']}\n")
-                        else:
-                            f.write(f"{account['Email']}:{account['Password']}\n")
-                self.log(f"{Fore.YELLOW}Failed accounts saved to {failed_file}{Style.RESET_ALL}")
-
-        except Exception as e:
-            self.log(f"{Fore.RED}Error saving results: {str(e)}{Style.RESET_ALL}")
+        """Save results through utility."""
+        return save_results_util(operation_type, success_accounts, failed_accounts, log=self.log)
 
     async def load_proxies(self):
         """Loading proxies from proxy.txt file"""
@@ -289,7 +213,7 @@ class Teneo:
                 print("2. Authorization")
                 print("3. Farm")
                 print("4. Wallet Connection & Creating smart account")
-                #print("5. Connect Twitter")
+                print("5. Connect Twitter & Claim X Campaign")
                 print("6. Exit")
                 choose = int(input("Choose action [1/2/3/4/5/6] -> ").strip())
 
@@ -313,63 +237,28 @@ class Teneo:
                 print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1, 2, 3, 4, 5 or 6).{Style.RESET_ALL}")
     
     def save_account_data(self, email: str, token: str = None, private_key: str = None):
-        """Saves account data (token, private key) to accounts.json file"""
-        try:
-            data = {}
-            if os.path.exists('data/accounts.json'):
-                with open('data/accounts.json', 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            
-            if email not in data:
-                data[email] = {}
-                
-            if token:
-                data[email]["token"] = token
-                
-            if private_key:
-                data[email]["wallet"] = private_key
-            
-            with open('data/accounts.json', 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-                
-            self.print_message(email, None, Fore.GREEN, "Account data saved successfully")
-        except Exception as e:
-            self.print_message(email, None, Fore.RED, f"Error saving account data: {str(e)}")
+        """Saves token/key through utility."""
+        return save_account_data_util(email, token=token, private_key=private_key, log=self.log)
 
     async def user_login(self, email: str, password: str, proxy=None):
         try:
             captcha_token = await self.captcha_solver.solve_captcha()
-
-            url = "https://auth.teneo.pro/api/login"
-            data = json.dumps({"email":email, "password":password, "turnstileToken":captcha_token})
-            headers = {
-                **self.headers,
-                "Content-Length": str(len(data)),
-                "Content-Type": "application/json"
-            }
-            connector = ProxyConnector.from_url(proxy) if proxy else None
             try:
-                async with ClientSession(connector=connector, timeout=ClientTimeout(total=120)) as session:
-                    async with session.post(url=url, headers=headers, data=data) as response:
-                        if response.status == 401:
-                            self.print_message(email, proxy, Fore.RED, "Invalid credentials")
-                            return None
-                        response.raise_for_status()
-                        result = await response.json()
-                        token = result.get('access_token')
-                        if token:
-                            self.save_account_data(email, token=token)
-                            return token
-                        return None
+                result = await teneo_login(email, password, captcha_token, proxy)
+                token = result.get('access_token')
+                if token:
+                    self.save_account_data(email, token=token)
+                    return token
+                return None
             except ClientResponseError as e:
                 if e.status == 401:
                     self.print_message(email, proxy, Fore.RED, "Invalid credentials")
                     return None
-                raise  # Пробрасываем остальные ошибки выше
+                raise  # Pass other errors up
             except Exception as e:
-                raise  # Пробрасываем все остальные ошибки выше
+                raise  # Pass all other errors up
         except Exception as e:
-            raise  # Пробрасываем ошибки капчи выше
+            raise  # Pass captcha errors up
         
     async def connect_websocket(self, email: str, token: str, use_proxy: bool):
         wss_url = f"wss://secure.ws.teneo.pro/websocket?accessToken={token}&version=v0.2"
@@ -394,7 +283,7 @@ class Teneo:
             session = ClientSession(connector=connector, timeout=ClientTimeout(total=300))
             try:
                 async with session:
-                    # Генерируем новый ключ для каждой попытки подключения
+                    # Generate new key for each connection attempt
                     headers["Sec-WebSocket-Key"] = base64.b64encode(secrets.token_bytes(16)).decode()
                     
                     async with session.ws_connect(wss_url, headers=headers) as wss:
@@ -488,7 +377,7 @@ class Teneo:
             if token:
                 self.print_message(email, proxy, Fore.GREEN, "Access Token Obtained Successfully")
                 return token
-            return None  # Если token None, значит была ошибка авторизации
+            return None              # If token is None, there was an authorization error
         except Exception as e:
             if "401" in str(e) or "Unauthorized" in str(e):
                 self.print_message(email, proxy, Fore.RED, "Invalid credentials")
@@ -497,16 +386,8 @@ class Teneo:
             return None
 
     def get_saved_token(self, email: str) -> str:
-        """Получает сохраненный токен из accounts.json для указанного email"""
-        try:
-            if os.path.exists('data/accounts.json'):
-                with open('data/accounts.json', 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if email in data and "token" in data[email]:
-                        return data[email]["token"]
-        except Exception as e:
-            self.log(f"{Fore.RED}Ошибка при чтении токена: {str(e)}{Style.RESET_ALL}")
-        return None
+        """Returns saved token through utility."""
+        return get_saved_token_util(email)
 
     async def process_accounts(self, email: str, password: str, use_proxy: bool):
         token = self.get_saved_token(email)
@@ -531,6 +412,18 @@ class Teneo:
             self.log(f"{Fore.YELLOW}Failed accounts saved to result/failed_accounts.txt{Style.RESET_ALL}")
         except Exception as e:
             self.log(f"{Fore.RED}Error saving failed accounts: {str(e)}{Style.RESET_ALL}")
+
+    def save_error(self, filename: str, email: str, message: str) -> None:
+        """Saves error string to result/<filename> with timestamp."""
+        try:
+            if not os.path.exists('result'):
+                os.makedirs('result')
+            path = os.path.join('result', filename)
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(f"[{ts}] {email} | {message}\n")
+        except Exception as e:
+            self.log(f"{Fore.RED}Error writing error log {filename}: {e}{Style.RESET_ALL}")
 
     async def process_auth_batch(self, accounts_batch, use_proxy):
         """Process a batch of accounts for authorization"""
@@ -558,62 +451,21 @@ class Teneo:
 
     async def sign_up(self, email: str, password: str, captcha_token: str, proxy=None):
         """Register a new account"""
-        url = 'https://auth.teneo.pro/api/signup'
-        register_data = json.dumps({
-            "email": email,
-            "password": password,
-            "invitedBy": INVITE_CODE,
-            "turnstileToken": captcha_token
-        })
-
-        headers = {
-                **self.headers,
-                "Content-Length": str(len(register_data)),
-                "Content-Type": "application/json",
-                'x-api-key': 'OwAG3kib1ivOJG4Y0OCZ8lJETa6ypvsDtGmdhcjB'
-            }
-
-
-        connector = ProxyConnector.from_url(proxy) if proxy else None
-        async with ClientSession(connector=connector) as session:
-            async with session.post(url=url,
-                                  data=register_data, headers=headers) as response:
-                return await response.json()
+        return await teneo_signup(email, password, INVITE_CODE, captcha_token, proxy)
 
     async def verify_email(self, email: str, token: str, code: str, proxy=None):
         """Verify email with received code"""
-        url = 'https://auth.teneo.pro/api/verify-email'
-        verif_data = json.dumps({
-            "token": token,
-            "verificationCode": code
-        })
-        headers = {
-                **self.headers,
-                "Content-Length": str(len(verif_data)),
-                "Content-Type": "application/json",
-                'x-api-key': 'OwAG3kib1ivOJG4Y0OCZ8lJETa6ypvsDtGmdhcjB'
-            }
-        
-        connector = ProxyConnector.from_url(proxy) if proxy else None
-        async with ClientSession(connector=connector) as session:
-            async with session.post(url=url,
-                                  data=verif_data, headers=headers) as response:
-                verify_response = await response.text()
-                try:
-                    response_data = json.loads(verify_response)
-                    if "access_token" in response_data:
-                        # Сохраняем токен
-                        self.save_account_data(email, token=response_data["access_token"])
-                except:
-                    pass
-                return verify_response
+        result = await teneo_verify_email(token, code, proxy)
+        if isinstance(result, dict) and result.get("access_token"):
+            self.save_account_data(email, token=result["access_token"])
+        return result
 
     def validate_email_domain(self, email: str) -> tuple[bool, str]:
         """
-        Проверка домена почты на допустимость и получение IMAP сервера.
+        Check email domain validity and get IMAP server.
         
         Returns:
-            tuple[bool, str]: (True/False, IMAP сервер или None)
+            tuple[bool, str]: (True/False, IMAP server or None)
         """
         try:
             if '@' not in email:
@@ -654,15 +506,15 @@ class Teneo:
                 return False
 
             self.print_message(email, proxy, Fore.CYAN, "Registering...")
-            response = await self.sign_up(email, password, captcha_token, proxy)
+            response = await auth_service.signup(email, password, INVITE_CODE, captcha_token, proxy)
             #print(response)
             
-            # Если аккаунт уже существует, считаем его успешным
+            # If account already exists, consider it successful
             if isinstance(response, dict) and response.get('message') == 'A user with this email address has already been registered':
                 self.print_message(email, proxy, Fore.GREEN, "Account already exists")
                 return True
                 
-            # Проверяем, что получили правильный ответ от сервера
+            # Check that we received correct response from server
             if isinstance(response, dict) and response.get('message') == 'Email with verification code sent':
                 registration_token = response.get('token')
                 self.print_message(email, proxy, Fore.CYAN, "Waiting for verification code...")
@@ -673,19 +525,12 @@ class Teneo:
                     return False
 
                 self.print_message(email, proxy, Fore.CYAN, "Verifying email...")
-                verify_response = await self.verify_email(email, registration_token, code, proxy)
-                #print(f"verify_response: {verify_response}")
-                try:
-                    response_data = json.loads(verify_response)
-                    if "access_token" in response_data:
-                        # Токен сохраняется в методе verify_email
-                        self.print_message(email, proxy, Fore.GREEN, "Registration successful")
-                        return True
-                    else:
-                        self.print_message(email, proxy, Fore.RED, f"Email verification failed: {verify_response}")
-                        return False
-                except json.JSONDecodeError:
-                    self.print_message(email, proxy, Fore.RED, f"Invalid response format: {verify_response}")
+                verify_response = await auth_service.verify(registration_token, code, proxy)
+                if isinstance(verify_response, dict) and verify_response.get("access_token"):
+                    self.print_message(email, proxy, Fore.GREEN, "Registration successful")
+                    return True
+                else:
+                    self.print_message(email, proxy, Fore.RED, f"Email verification failed: {verify_response}")
                     return False
             else:
                 self.print_message(email, proxy, Fore.RED, f"Registration failed: {response.get('message', 'Unknown error')}")
@@ -726,45 +571,21 @@ class Teneo:
         
         while retry_count <= max_retries:
             try:
-                # Подготовка сообщения для подписи
+                # Prepare message for signing
                 message = f"Permanently link wallet to Teneo account: {email} This can only be done once."
                 
-                # Создание подписи с использованием приватного ключа
+                # Create signature using private key
                 w3 = Web3()
                 message_hash = encode_defunct(text=message)
                 signed_message = Account.sign_message(message_hash, private_key=private_key)
-                signature = "0x" + signed_message.signature.hex()  # Добавляем префикс 0x к подписи
+                signature = "0x" + signed_message.signature.hex()  # Add 0x prefix to signature
                 
-                # Подготовка данных для запроса
-                data = json.dumps({
-                    "address": wallet_address,
-                    "signature": signature,
-                    "message": message
-                })
-                
-                url = "https://api.teneo.pro/api/users/link-wallet"
-                headers = {
-                    **self.headers,
-                    "Authorization": f"Bearer {token}",
-                    "Content-Length": str(len(data)),
-                    "Content-Type": "application/json"
-                }
-                
-                connector = ProxyConnector.from_url(current_proxy) if current_proxy else None
-                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with session.post(url=url, headers=headers, data=data) as response:
-                        response.raise_for_status()
-                        result = await response.json()
-                        if result.get('status') == 'success' or 'wallet' in result:
-                            # Сохраняем приватный ключ в accounts.json
-                            self.save_account_data(email, private_key=private_key)
-                            self.print_message(email, current_proxy, Fore.GREEN, f"Wallet {wallet_address} connected successfully")
-                            return True
-                        else:
-                            self.print_message(email, current_proxy, Fore.RED, f"Failed to connect wallet: {result.get('message', 'Unknown error')}")
-                            return False
+                ok = await wallet_service.link_wallet(email, token, wallet_address, private_key, current_proxy, self.log)
+                if ok:
+                    self.save_account_data(email, private_key=private_key)
+                return ok
             except Exception as e:
-                # Проверяем, связана ли ошибка с прокси
+                # Check if error is related to proxy
                 if "Couldn't connect to proxy" in str(e) or "proxy" in str(e).lower() or "timeout" in str(e).lower() or "connection" in str(e).lower():
                     retry_count += 1
                     if retry_count <= max_retries:
@@ -778,42 +599,23 @@ class Teneo:
                     return False
 
     async def check_wallet_status(self, email: str, token: str, proxy=None, max_retries=3):
-        """Проверяет статус привязки кошелька к аккаунту"""
+        """Checks wallet binding status to account"""
         retry_count = 0
         current_proxy = proxy
         
         while retry_count <= max_retries:
             try:
-                url = "https://api.teneo.pro/api/users/smart-id-requirements"
-                headers = {
-                    **self.headers,
-                    "Authorization": f"Bearer {token}"
-                }
-                
-                connector = ProxyConnector.from_url(current_proxy) if current_proxy else None
-                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with session.get(url=url, headers=headers) as response:
-                        response.raise_for_status()
-                        result = await response.json()
-                        
-                        wallet_status = result.get('wallet', False)
-                        heartbeats = result.get('currentHeartbeats', 0)
-                        requirements_met = result.get('requirementsMet', False)
-                        existing_smart_account = result.get('existingSmartAccount', False)
-                        status = result.get('status', 'unknown')
-                        
-                        status_message = (
-                            f"Wallet status: {'Connected' if wallet_status else 'Not connected'}, "
-                            f"Heartbeats: {heartbeats}, "
-                            f"Requirements met: {'Yes' if requirements_met else 'No'}, "
-                            f"Smart Account: {'Exists' if existing_smart_account else 'Not exists'}, "
-                            f"Status: {status}"
-                        )
-                        
-                        self.print_message(email, current_proxy, Fore.CYAN, status_message)
-                        return result
+                result = await teneo_smart_id_requirements(token, current_proxy)
+
+                wallet_status = result.get('wallet', False)
+                heartbeats = result.get('currentHeartbeats', 0)
+                requirements_met = result.get('requirementsMet', False)
+                existing_smart_account = result.get('existingSmartAccount', False)
+                status = result.get('status', 'unknown')
+
+                return await wallet_service.get_wallet_status(email, token, current_proxy, lambda m: self.print_message(email, current_proxy, Fore.CYAN, m))
             except Exception as e:
-                # Проверяем, связана ли ошибка с прокси
+                # Check if error is related to proxy
                 if "Couldn't connect to proxy" in str(e) or "proxy" in str(e).lower() or "timeout" in str(e).lower() or "connection" in str(e).lower():
                     retry_count += 1
                     if retry_count <= max_retries:
@@ -833,52 +635,27 @@ class Teneo:
         
         while retry_count <= max_retries:
             try:
-                # Генерируем nonce (текущее время в миллисекундах)
+                # Generate nonce (current time in milliseconds)
                 nonce = str(int(datetime.now().timestamp() * 1000))
                 
-                # Подготавливаем сообщение для подписи
-                # Предполагаем, что сообщение включает nonce
+                # Prepare message for signing
+                # Assume message includes nonce
                 message = f"Create Teneo Smart Account with nonce: {nonce}"
                 
-                # Подписываем сообщение
+                # Sign message
                 w3 = Web3()
                 message_hash = encode_defunct(text=message)
                 signed_message = Account.sign_message(message_hash, private_key=private_key)
                 signature = signed_message.signature.hex()
                 
-                # Добавляем префикс 0x, если его нет
+                # Add 0x prefix if not present
                 if not signature.startswith("0x"):
                     signature = "0x" + signature
                 
-                # Подготовка данных для запроса
-                data = json.dumps({
-                    "machineOwner": wallet_address.lower(),  # Адрес в нижнем регистре
-                    "nonce": nonce,
-                    "signature": signature
-                })
-                
-                url = "https://api.teneo.pro/api/peaq/create-smart-account"
-                headers = {
-                    **self.headers,
-                    "Authorization": f"Bearer {token}",
-                    "Content-Length": str(len(data)),
-                    "Content-Type": "application/json"
-                }
-                
-                connector = ProxyConnector.from_url(current_proxy) if current_proxy else None
-                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with session.post(url=url, headers=headers, data=data) as response:
-                        response.raise_for_status()
-                        result = await response.json()
-                        if result.get('success') == True:
-                            self.print_message(email, current_proxy, Fore.GREEN, f"Smart account created successfully. TX Hash: {result.get('txHash', 'N/A')}")
-                            return True
-                        else:
-                            self.print_message(email, current_proxy, Fore.RED, f"Failed to create smart account: {result.get('message', 'Unknown error')}")
-                            return False
+                return await wallet_service.create_smart(email, token, wallet_address, private_key, current_proxy, self.log)
                 
             except Exception as e:
-                # Проверяем, связана ли ошибка с прокси
+                # Check if error is related to proxy
                 if "Couldn't connect to proxy" in str(e) or "proxy" in str(e).lower() or "timeout" in str(e).lower() or "connection" in str(e).lower():
                     retry_count += 1
                     if retry_count <= max_retries:
@@ -898,27 +675,16 @@ class Teneo:
         
         while retry_count <= max_retries:
             try:
-                url = "https://api.teneo.pro/api/users/connect-smart-id"
-                headers = {
-                    **self.headers,
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json"
-                }
-                
-                connector = ProxyConnector.from_url(current_proxy) if current_proxy else None
-                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with session.post(url=url, headers=headers) as response:
-                        response.raise_for_status()
-                        result = await response.json()
-                        if result.get('status') == 'success' or result.get('connected') == True:
-                            self.print_message(email, current_proxy, Fore.GREEN, "Wallet successfully connected to dashboard")
-                            return True
-                        else:
-                            self.print_message(email, current_proxy, Fore.RED, f"Failed to connect wallet to dashboard: {result.get('message', 'Unknown error')}")
-                            return False
+                result = await teneo_connect_smart_id(token, current_proxy)
+                if result.get('status') == 'success' or result.get('connected') == True:
+                    self.print_message(email, current_proxy, Fore.GREEN, "Wallet successfully connected to dashboard")
+                    return True
+                else:
+                    self.print_message(email, current_proxy, Fore.RED, f"Failed to connect wallet to dashboard: {result.get('message', 'Unknown error')}")
+                    return False
                         
             except Exception as e:
-                # Проверяем, связана ли ошибка с прокси
+                # Check if error is related to proxy
                 if "Couldn't connect to proxy" in str(e) or "proxy" in str(e).lower() or "timeout" in str(e).lower() or "connection" in str(e).lower():
                     retry_count += 1
                     if retry_count <= max_retries:
@@ -947,38 +713,38 @@ class Teneo:
                 self.print_message(email, proxy, Fore.RED, "Failed to get token for wallet connection")
                 return False
                 
-            # Проверяем текущий статус кошелька
+            # Check current wallet status
             wallet_status = await self.check_wallet_status(email, token, proxy)
             
-            # Если кошелек уже привязан
+            # If wallet is already connected
             if wallet_status and wallet_status.get('wallet', False):
                 self.print_message(email, proxy, Fore.GREEN, "Wallet already connected to account")
                 
-                # Проверяем, существует ли уже смарт-аккаунт
+                # Check if smart account already exists
                 existing_smart_account = wallet_status.get('existingSmartAccount', False)
                 if existing_smart_account:
                     self.print_message(email, proxy, Fore.GREEN, "Smart account already exists")
                     return True
                 
-                # Создаем смарт-аккаунт, если его еще нет
+                # Create smart account if it doesn't exist yet
                 self.print_message(email, proxy, Fore.CYAN, "Creating smart account...")
                 return await self.create_smart_account(email, token, wallet_address, private_key, proxy)
                 
             # Connect wallet
             wallet_linked = await self.connect_wallet(email, token, wallet_address, private_key, proxy)
             
-            # Если кошелек успешно привязан, проверяем и создаем смарт-аккаунт при необходимости
+            # If wallet successfully connected, check and create smart account if needed
             if wallet_linked:
-                # Повторно проверяем статус после привязки кошелька
+                # Re-check status after wallet connection
                 wallet_status = await self.check_wallet_status(email, token, proxy)
                 
-                # Проверяем, существует ли уже смарт-аккаунт
+                # Check if smart account already exists
                 existing_smart_account = wallet_status.get('existingSmartAccount', False)
                 if existing_smart_account:
                     self.print_message(email, proxy, Fore.GREEN, "Smart account already exists")
                     return True
                 
-                # Создаем смарт-аккаунт, если его еще нет
+                # Create smart account if it doesn't exist yet
                 self.print_message(email, proxy, Fore.CYAN, "Creating smart account...")
                 return await self.create_smart_account(email, token, wallet_address, private_key, proxy)
                 
@@ -1010,7 +776,7 @@ class Teneo:
         
         i = 0
         for account in accounts_batch:
-            if account.get('Wallet') and account.get('PrivateKey'):  # Обрабатываем только аккаунты с кошельком и приватным ключом
+            if account.get('Wallet') and account.get('PrivateKey'):  # Process only accounts with wallet and private key
                 if isinstance(results[i], Exception) or not results[i]:
                     failed_accounts.append(account)
                 elif results[i]:
@@ -1023,24 +789,20 @@ class Teneo:
 
     async def get_isppaccepted(self):
         """
-        Делает GET-запрос к https://api.teneo.pro/api/users/isppaccepted и возвращает результат.
+        Makes GET request to https://api.teneo.pro/api/users/isppaccepted and returns result.
         """
-        url = "https://api.teneo.pro/api/users/isppaccepted"
         try:
-            async with ClientSession(timeout=ClientTimeout(total=30)) as session:
-                async with session.get(url) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    self.log(f"Ответ от /isppaccepted: {result}")
-                    return result
+            result = await teneo_isppaccepted()
+            #self.log(f"Response from /isppaccepted: {result}")
+            return result
         except Exception as e:
-            self.log(f"{Fore.RED}Ошибка при запросе /isppaccepted: {e}{Style.RESET_ALL}")
+            self.log(f"{Fore.RED}Error requesting /isppaccepted: {e}{Style.RESET_ALL}")
             return None
 
     def load_twitter_accounts(self):
         """
-        Загружает аккаунты из data/twitter.txt в формате login:pass:private_key:twitter_token
-        Возвращает список словарей с ключами: Email, Password, PrivateKey, TwitterToken
+        Loads accounts from data/twitter.txt in format login:pass:private_key:twitter_token
+        Returns list of dictionaries with keys: Email, Password, PrivateKey, TwitterToken
         """
         filename = "data/twitter.txt"
         try:
@@ -1063,190 +825,292 @@ class Teneo:
                             "TwitterToken": twitter_token.strip()
                         })
                     else:
-                        self.log(f"{Fore.YELLOW}Некорректная строка в twitter.txt: {line}{Style.RESET_ALL}")
+                        self.log(f"{Fore.YELLOW}Invalid line in twitter.txt: {line}{Style.RESET_ALL}")
             return accounts
         except Exception as e:
             self.log(f"{Fore.RED}Error loading accounts from {filename}: {e}{Style.RESET_ALL}")
             return []
 
-    async def get_cookies_with_zendriver(self, url: str, proxy: str = None, headless: bool = False) -> dict:
-        """
-        Открывает браузер через zendriver с прокси, ждет 10 секунд полной загрузки, затем собирает cookies для указанного url и возвращает их в виде dict.
-        Можно указать user_agent.
-        """
-        cookies = {}
-        try:
-            async with BrowserHandler(proxy=proxy, headless=headless) as browser:
-                tab = browser.driver.main_tab
-                await tab.get(url)
-                await tab.sleep(10)  # Ждем полной загрузки страницы
-                try:
-                    all_cookies = await tab.driver.cookies.get_all()
-                except Exception:
-                    all_cookies = await browser.driver.cookies.get_all()
-                for c in all_cookies:
-                    if isinstance(c, dict):
-                        cookies[c.get('name')] = c.get('value')
-                    else:
-                        cookies[getattr(c, 'name', None)] = getattr(c, 'value', None)
-                self.log(f"{Fore.GREEN}Получены cookies для {url}: {list(cookies.keys())}{Style.RESET_ALL}")
-        except Exception as e:
-            self.log(f"{Fore.RED}Ошибка при получении cookies через zendriver: {e}{Style.RESET_ALL}")
-        return cookies
 
-    async def get_vercel_challenge_with_playwright(self, user_agent: str, proxy: str = None) -> dict:
-        """
-        Открывает браузер через playwright, переходит на https://extra-points.teneo.pro/follow-us-on-x/?page_number=0,
-        перехватывает challenge-заголовки (x-vercel-challenge-token, x-vercel-challenge-solution, x-vercel-challenge-version)
-        и возвращает их в виде словаря.
-        """
-        import asyncio
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                channel='chrome',
-                headless=False,
-                proxy={"server": proxy} if proxy else None,
-                args=['--no-sandbox', '--disable-setuid-sandbox']
-            )
-            page = await browser.new_page(user_agent=user_agent)
-            challenge_data = {}
-            challenge_future = asyncio.get_event_loop().create_future()
-
-            async def handle_request(request):
-                if 'request-challenge' in request.url:
-                    headers = request.headers
-                    challenge_data['token'] = headers.get('x-vercel-challenge-token')
-                    challenge_data['solution'] = headers.get('x-vercel-challenge-solution')
-                    challenge_data['version'] = headers.get('x-vercel-challenge-version')
-                    if not challenge_future.done():
-                        challenge_future.set_result(True)
-
-            page.on('request', handle_request)
-            await page.goto('https://extra-points.teneo.pro/follow-us-on-x/?page_number=0', wait_until='domcontentloaded')
-            try:
-                await asyncio.wait_for(challenge_future, timeout=30)
-            except asyncio.TimeoutError:
-                await browser.close()
-                raise Exception('Challenge params not found (timeout)')
-            await browser.close()
-            self.log(f"[Playwright] Перехвачены challenge-заголовки: token={challenge_data.get('token')}, solution={challenge_data.get('solution')}, version={challenge_data.get('version')}")
-            return challenge_data
-
-    async def get_isppaccepted_with_token(self, token, email=None, proxy=None):
-        """
-        Делает GET-запрос к https://api.teneo.pro/api/users/isppaccepted с авторизацией по токену и поддержкой прокси.
-        Если isppAccepted: False — делает POST-запрос к /api/users/accept-pp, затем GET к follow-us-on-x.
-        """
+    async def connect_twitter(self, email=None, private_key=None, twitter_token=None, proxy=None):
+        
+        #print(token)
         if email:
             token = self.get_saved_token(email)
             if token:
                 token = token.strip()
-                self.log(f"{Fore.YELLOW}Токен для {email} загружен из accounts.json (длина: {len(token)}){Style.RESET_ALL}")
+                self.log(f"{Fore.YELLOW}Token for {email} loaded from accounts.json (length: {len(token)}){Style.RESET_ALL}")
             else:
-                self.log(f"{Fore.RED}Токен для {email} не найден в accounts.json! Пропуск...{Style.RESET_ALL}")
+                self.log(f"{Fore.RED}Token for {email} not found in accounts.json! Skipping...{Style.RESET_ALL}")
                 return None
         else:
-            self.log(f"{Fore.RED}Email не передан для поиска токена! Пропуск...{Style.RESET_ALL}")
+            self.log(f"{Fore.RED}Email not provided for token search! Skipping...{Style.RESET_ALL}")
             return None
-        url = "https://api.teneo.pro/api/users/isppaccepted"
-        headers = {
-            **self.headers,
-            "Authorization": f"Bearer {token}"
-        }
         try:
+            result = await teneo_isppaccepted(token, proxy)
+            #self.log(f"Response from /isppaccepted for {email or ''}: {result}")
+            if isinstance(result, dict) and result.get('isppAccepted') is False:
+                post_result = await teneo_accept_pp(token, proxy)
+                #self.log(f"POST /accept-pp for {email or ''}: {post_result}")
+        except Exception as e:
+            msg = f"Error requesting /isppaccepted: {e}"
+            self.log(f"{Fore.RED}{msg} for {email or ''}{Style.RESET_ALL}")
+            self.save_error('error_twitter.txt', email or '-', msg)
+            return None
+        # Check campaign status: if claim is already available — claim immediately
+        company_name = "Engage with Teneo on X"
+        self.log(f"{Fore.CYAN}Checking campaign status '{company_name}' for {email}...{Style.RESET_ALL}")
+
+        campaign_status = await self.check_campaign_status(email, token, company_name, proxy)
+        
+        if campaign_status == True:
+            self.log(f"{Fore.GREEN}Campaign 'Engage with Teneo on X' completed for {email}{Style.RESET_ALL}")
+            return True
+        elif campaign_status == "claimable":
+            self.log(f"{Fore.YELLOW}Campaign 'Engage with Teneo on X' available for completion for {email}{Style.RESET_ALL}")
+            claimed = await self.claim_x_campaign(email, token, proxy)
+            if claimed:
+                return True
+            return "claimable"
+        else:
+            self.log(f"{Fore.CYAN}Campaign 'Engage with Teneo on X' not yet completed for {email}{Style.RESET_ALL}")
+            #return False
+        # Make POST request to api.deform.cc to get form information
+        """try:
+            deform_url = "https://api.deform.cc/"
+            deform_data = {
+                "operationName": "Form",
+                "variables": {
+                    "formId": "3ee8174c-5437-46e5-ab09-ce64d6e1b93e"
+                },
+                "query": "query Form($formId: String!) {\n  form(id: $formId) {\n    isCaptchaEnabled\n    isEmailCopyOfResponseEnabled\n    workspace {\n      billingTier {\n        name\n        __typename\n      }\n      __typename\n    }\n    fields {\n      id\n      required\n      title\n      type\n      description\n      fieldOrder\n      properties\n      TMP_isWaitlistIdentity\n      __typename\n    }\n    pageGroups {\n      id\n      isRandomizable\n      numOfPages\n      __typename\n    }\n    pages {\n      id\n      title\n      description\n      timerInSeconds\n      fields {\n        id\n        required\n        title\n        type\n        description\n        fieldOrder\n        properties\n        TMP_isWaitlistIdentity\n        __typename\n      }\n      formPageGroup {\n        id\n        __typename\n      }\n      __typename\n    }\n    workspace {\n      billingTier {\n        name\n        __typename\n      }\n      __typename\n    }\n    formConditionSets {\n      id\n      logicalOperator\n      name\n      createdAt\n      updatedAt\n      fieldConditions {\n        id\n        operator\n        values\n        formField {\n          id\n          type\n          properties\n          __typename\n        }\n        __typename\n      }\n      fieldActions {\n        id\n        action\n        formField {\n          id\n          __typename\n        }\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}"
+            }
             connector = ProxyConnector.from_url(proxy) if proxy else None
             async with ClientSession(connector=connector, timeout=ClientTimeout(total=30)) as session:
-                async with session.get(url, headers=headers) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    self.log(f"Ответ от /isppaccepted для {email or ''}: {result}")
-                    if isinstance(result, dict) and result.get('isppAccepted') is False:
-                        # Делаем POST-запрос accept-pp
-                        post_url = "https://api.teneo.pro/api/users/accept-pp"
-                        async with session.post(post_url, headers=headers, json={}) as post_response:
-                            post_response.raise_for_status()
-                            post_result = await post_response.json()
-                            self.log(f"POST /accept-pp для {email or ''}: {post_result}")
-                    # Получаем cookies через zendriver перед запросом
-                    cookies = await self.get_cookies_with_zendriver("https://extra-points.teneo.pro", proxy)
-                    # Формируем строку Cookie для заголовка из всех cookies
-                                        # После этого делаем GET к follow-us-on-x
-                    vcrcs = cookies.get("_vcrcs")
-                    if vcrcs:
-                        vcrcs = vcrcs.replace('"', '').replace("'", '')
+                async with session.post(deform_url, json=deform_data) as deform_response:
+                    deform_response.raise_for_status()
+                    deform_result = await deform_response.json()
+                    #self.log(f"POST api.deform.cc Form query for {email or ''}: {deform_result}")
+        except Exception as e:
+            self.log(f"{Fore.RED}Error requesting api.deform.cc Form query for {email or ''}: {e}{Style.RESET_ALL}")
+            return None
+        """
+        # Connect Twitter account
+        try:
+            one_time_token = await twitter_service.bind_and_get_one_time_token(email, twitter_token, proxy, self.log)
+            if not one_time_token:
+                msg = "Failed to get oneTimeToken"
+                self.log(f"{Fore.RED}{msg} for {email}{Style.RESET_ALL}")
+                self.save_error('error_twitter.txt', email, msg)
+                return None
+            #print("Twitter account successfully connected")
+        except Exception as e:
+            msg = f"Error connecting Twitter: {e}"
+            self.log(f"{Fore.RED}{msg} for {email or ''}{Style.RESET_ALL}")
+            self.save_error('error_twitter.txt', email, msg)
+            return None
+        
 
-
-                    follow_url = "https://extra-points.teneo.pro/follow-us-on-x/?page_number=0"
-                    follow_headers = {
-                        "Connection": "keep-alive",
-                        "Cache-Control": "max-age=0",
-                        "sec-ch-ua": '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
-                        "sec-ch-ua-mobile": "?0",
-                        "sec-ch-ua-platform": '"Windows"',
-                        "Upgrade-Insecure-Requests": "1",
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                        "Sec-Fetch-Site": "same-origin",
-                        "Sec-Fetch-Mode": "navigate",
-                        "Sec-Fetch-Dest": "document",
-                        "Referer": follow_url,
-                        "Accept-Encoding": "gzip, deflate, br, zstd",
-                        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+        # Create wallet signature
+        try:
+            wallet_data = await self.submit_form_with_wallet_signature(email, private_key, proxy)
+            if not wallet_data:
+                self.log(f"{Fore.RED}Failed to get wallet data for {email}{Style.RESET_ALL}")
+                return None
+            
+            #self.log(f"Wallet successfully connected for {email}: {wallet_data['wallet_address']}")
+        except Exception as e:
+            self.log(f"{Fore.RED}Error working with wallet for {email}{Style.RESET_ALL}")
+            return None
+        #print("requesting captcha")
+        self.log(f"{Fore.CYAN}Requesting captcha for {email}{Style.RESET_ALL}")
+        captcha_token = await self.captcha_solver2.solve_captcha()
+        #captcha_token = "0cAFcWeA70VCZn9-tniN2n8n9ugZtpyu0k8Q8mb7al1emfSoQKNLY4z38nDuC2yPIJrntbaXSpDJpBynyIUzwPxMS09dyLYbWnEpzIg04CjvecFAbxXkx2XBWsCcSwGV6ordcD0idFju5CtbQiWRA5_q6OqwraqsVFvCQ93ecgtVKzf0bgClXdn8aSivl53hJEH-zG_b1qCQ0MjIvDT1mTetWMGLN0NbsTlJdBi98W4phq3xxgggHoT_9hmUebdw53iP5lTHA1vwLhb7H98q40WrZik018P98EMTaiQnTc9WgfstAPavOUxVMNf3u_eC1FpALcIfuhreMjf9IbwklHCM-178ETsPb1uLxqtAOkKzj4jQa4Em1Pnhl4JRVzAh5FVg5oUenFuTZSBDn86XUqCz-78YTjSixEu1zWFWS5gMJKOXUL8vqilgVemFOwaEDMBhlm2OPQO2wxtCc55mykAWIdXY0SsW_3ayFIGs0QFOsa9N4TQQKhadiBctO5kTFqPYLEqgsY2S_NrGbH-Y59HQWsZiJSkJ57UzG2_k2gY3yVkQiaI-CeJEIlJoq2ZBondV4dklih3XRHWVJ5WlSiSPa_PsZ7-KQ-vRAAV2F9Hyr4oxEnI0j329zTSFe6PZz5bMIdaENumwxTClugJQNqyYhEVkNNGrgb350TSkoNJ8S1qCGd9RH1rXcsLC7XHLBy-1OlHesiXM2JXGM08gfuJnZXLNRagsixJ3Z-nUUVDBkRoGjJ4Z-OtnszRyksWpg50oF99ZqsbriKHbi4Izf_jt5F3KS5-WzuShnDULazAMH3QNcrNBxAEwk"
+        #print(f"captcha received: {captcha_token}")
+        # Make POST request to api.deform.cc
+        try:
+            deform_url = "https://api.deform.cc/"
+            deform_data =  {
+                "operationName": "AddFormResponse",
+                "variables": {
+                    "data": {
+                        "addFormResponseItems": [{
+                            "formFieldId": "2a52b0ef-6098-4982-a1d5-6d7e6466a5f4",
+                            "inputValue": {
+                                "address": wallet_data["wallet_address"],
+                                "signature": wallet_data["signature"],
+                                "message": wallet_data["message"],
+                                "ethAddress": wallet_data["wallet_address"]
+                            }
+                        }, {
+                            "formFieldId": "3ab37c3e-ca1a-4684-a970-64b5c0628521",
+                            "inputValue": {
+                                "choiceRefs": ["0b92ab28-121e-4206-8c26-7d28676080df"]
+                            }
+                        }, {
+                            "formFieldId": "221ae09a-68c2-4807-b70c-65bf4f988fd3",
+                            "inputValue": {
+                                "oneTimeToken": one_time_token
+                            }
+                        }],
+                        "formId": "3ee8174c-5437-46e5-ab09-ce64d6e1b93e",
+                        "captchaToken": captcha_token,   # Need to get
+                        "browserFingerprint": "31ef7106755ab8df6624eb1da47a4a8c",
+                        "referralCode": ""
                     }
+                },
+                "query": "mutation AddFormResponse($data: AddFormResponseInput!) {\n  addFormResponse(data: $data) {\n    id\n    createdAt\n    tagOutputs {\n      tag {\n        id\n        __typename\n      }\n      queryOutput\n      __typename\n    }\n    form {\n      type\n      __typename\n    }\n    campaignSpot {\n      identityType\n      identityValue\n      __typename\n    }\n    __typename\n  }\n}"
+            }
+            connector = ProxyConnector.from_url(proxy) if proxy else None
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=30)) as session:
+                async with session.post(deform_url, json=deform_data) as deform_response:
+                    deform_response.raise_for_status()
+                    deform_result = await deform_response.json()
+                    #self.log(f"POST api.deform.cc for {email or ''}: {deform_result}")
                     
-                    if vcrcs:
-                        follow_headers["Cookie"] = f"_vcrcs={vcrcs}"
-                    # Используем отдельную сессию без cookie_jar и НЕ передаем параметр cookies!
-                    async with ClientSession(connector=connector, timeout=ClientTimeout(total=30)) as session2:
-                        async with session2.get(follow_url, headers=follow_headers) as follow_response:
-                            follow_response.raise_for_status()
-                            follow_result = await follow_response.json()
-                            self.log(f"GET /follow-us-on-x для {email or ''}: {follow_result}")
-                    return result
-                
-                    cookies = await self.get_vercel_challenge_with_playwright("https://extra-points.teneo.pro/follow-us-on-x/?page_number=0", proxy)
-                    token = cookies.get("token")
-                    version = cookies.get("version")
-                    solution = cookies.get("solution")
-                    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+                    # Check for errors in response
+                    if deform_result.get('errors'):
+                        error_message = deform_result['errors'][0].get('message', 'Unknown error')
+                        self.log(f"{Fore.RED}Error sending form for {email}: {error_message}{Style.RESET_ALL}")
+                        return False
+                    
+                    # Check response success
+                    if (deform_result.get('data', {}).get('addFormResponse', {}).get('id') and 
+                        deform_result.get('data', {}).get('addFormResponse', {}).get('createdAt')):
+                        
+                        response_id = deform_result['data']['addFormResponse']['id']
+                        created_at = deform_result['data']['addFormResponse']['createdAt']
+                        self.log(f"{Fore.GREEN}Form successfully sent for {email}! ID: {response_id}, created: {created_at}{Style.RESET_ALL}")
+                        
+                        # Check campaign status with retries (until claim)
+                        attempts = 5
+                        for i in range(attempts):
+                            self.log(
+                                f"{Fore.CYAN}Checking campaign status for {email}... attempt {i+1}/{attempts}{Style.RESET_ALL}"
+                            )
+                            campaign_status = await self.check_campaign_status(email, token, company_name, proxy)
+                            if campaign_status == "claimable":
+                                self.log(
+                                    f"{Fore.YELLOW}Campaign 'Engage with Teneo on X' available for completion for {email}{Style.RESET_ALL}"
+                                )
+                                # Try to claim
+                                claimed = await self.claim_x_campaign(email, token, proxy)
+                                if claimed:
+                                    return True
+                                return "claimable"
+                            if campaign_status is True:
+                                self.log(
+                                    f"{Fore.GREEN}Campaign 'Engage with Teneo on X' completed for {email}{Style.RESET_ALL}"
+                                )
+                                return True
+                            if i < attempts - 1:
+                                self.log(
+                                    f"{Fore.CYAN}Claim not available. Waiting 60 seconds before next check...{Style.RESET_ALL}"
+                                )
+                                await asyncio.sleep(60)
+                        self.log(
+                            f"{Fore.YELLOW}Claim did not become available after {attempts} attempts for {email}{Style.RESET_ALL}"
+                        )
+                        return False
+                        #else:
+                           # self.log(f"{Fore.CYAN}Campaign 'Engage with Teneo on X' not yet completed for {email}, continuing execution...{Style.RESET_ALL}")
+                            # DON'T return False, continue execution
+                    else:
+                        msg = "Error sending form: invalid response"
+                        self.log(f"{Fore.RED}{msg} for {email}{Style.RESET_ALL}")
+                        self.save_error('error_twitter.txt', email, msg)
+                        return False
+                        
+        except Exception as e:
+            msg = f"Error requesting api.deform.cc: {e}"
+            self.log(f"{Fore.RED}{msg} for {email or ''}{Style.RESET_ALL}")
+            self.save_error('error_twitter.txt', email, msg)
+            return None
 
-                    url = "https://extra-points.teneo.pro/.well-known/vercel/security/request-challenge"
-                    headers = {
-                        "Host": "extra-points.teneo.pro",
-                        "Connection": "keep-alive",
-                        #"Content-Length": "0",
-                        "x-vercel-challenge-token": token,
-                        "x-vercel-challenge-version": version,
-                        "x-vercel-challenge-solution": solution,
-                        "User-Agent": user_agent,
-                        #"DNT": "1",
-                        "Accept": "*/*",
-                        "Origin": "https://extra-points.teneo.pro",
-                        "Sec-Fetch-Site": "same-origin",
-                        "Sec-Fetch-Mode": "cors",
-                        "Sec-Fetch-Dest": "empty",
-                        "Referer": "https://extra-points.teneo.pro/.well-known/vercel/security/static/challenge.v2.min.js",
-                        "Accept-Encoding": "gzip, deflate, br, zstd",
-                        "Accept-Language": "ru-RU,ru;q=0.9",
-                        # Удалён лишний Content-Type
-                    }
-
-                    async with ClientSession(connector=connector,cookie_jar=DummyCookieJar()) as session:
-                        async with session.post(url, headers=headers, data=b"") as resp:
-                            text = await resp.text()
-                            print(f"Status: {resp.status}")
-                            print(f"Response: {text}")
-                            print(f"cookies: {resp.cookies}")
+    async def claim_x_campaign(self, email: str, token: str, proxy=None) -> bool:
+        """Attempts to claim X-campaign."""
+        try:
+            result = await teneo_claim_submission(token, "x", proxy)
+            if isinstance(result, dict) and result.get("success") is True:
+                self.log(f"{Fore.GREEN}Claim successful for {email}: {result.get('message', '')}{Style.RESET_ALL}")
+                return True
+            self.log(f"{Fore.YELLOW}Claim not completed for {email}: {result}{Style.RESET_ALL}")
+            self.save_error('error_twitter.txt', email, f"Claim failed: {result}")
+            return False
+        except Exception as e:
+            msg = f"Error claiming X-campaign: {e}"
+            self.log(f"{Fore.RED}{msg} for {email}{Style.RESET_ALL}")
+            self.save_error('error_twitter.txt', email, msg)
+            return False
+        
+    async def connect_twitter_account(self, email, auth_token, proxy=None):
+        # Moved to core/services/twitter.py (kept for backward compatibility if called elsewhere)
+        return await twitter_service.bind_and_get_one_time_token(email, auth_token, proxy, self.log)
+    
+    async def check_campaign_status(self, email, token, company_name, proxy=None):
+        """
+        Checks status of specific campaign
+        Returns True if campaign is completed, False if not
+        """
+        try:
+            return await campaign_service.get_status(email, token, company_name, proxy, self.log)
                     
         except Exception as e:
-            self.log(f"{Fore.RED}Ошибка при запросе /isppaccepted для {email or ''}: {e}{Style.RESET_ALL}")
+            self.log(f"{Fore.RED}Error checking campaign status '{company_name}' for {email}: {e}{Style.RESET_ALL}")
+            return False
+    
+    def get_twitter_auth_token(self, email):
+        """Get Twitter auth_token for email from twitter.txt file"""
+        twitter_accounts = self.load_accounts("twitter")
+        for account in twitter_accounts:
+            if len(account) >= 2 and account[0] == email:
+                return account[1]  # auth_token
+        return None
+
+    async def submit_form_with_wallet_signature(self, email, private_key, proxy=None):
+        """Create wallet signature (unified format, address in lower-case)."""
+        try:
+            data = sign_siwe_for_form(private_key)
+            # Strict signature verification (recover must match address from private key)
+            try:
+                recovered = Account.recover_message(
+                    encode_defunct(text=data["message"]),
+                    signature=bytes.fromhex(data["signature"][2:])
+                )
+                if recovered != data["wallet_address"]:
+                    self.log(
+                        f"{Fore.RED}Signature verification failed for {email}: recovered={recovered} addr={data['wallet_address']}{Style.RESET_ALL}"
+                    )
+                    return None
+            except Exception as e:
+                self.log(f"{Fore.RED}Error in signature verification for {email}: {e}{Style.RESET_ALL}")
+                return None
+            return data
+        except Exception as e:
+            self.log(f"{Fore.RED}Error signing wallet for {email}: {e}{Style.RESET_ALL}")
             return None
+    
+    def get_wallet_data(self, email):
+        """Get wallet address and private key for email from wallet.txt file"""
+        wallet_accounts = self.load_accounts("wallet")
+        self.log(f"Loaded {len(wallet_accounts)} wallets, searching for {email}")
+        
+        for account in wallet_accounts:
+            if account.get("Email") == email:
+                wallet_data = {
+                    "address": account.get("Wallet"),  # wallet address
+                    "private_key": account.get("PrivateKey")  # private key
+                }
+                self.log(f"Found wallet for {email}: address={wallet_data['address'][:10]}..., private_key={'*' * 10}")
+                return wallet_data
+        
+        self.log(f"Wallet for {email} not found in {len(wallet_accounts)} loaded accounts")
+        return None
 
     async def process_twitter_batch(self, accounts_batch, use_proxy):
         """
-        Обрабатывает пакет аккаунтов из twitter.txt: делает get-запрос с токеном и прокси, собирает неудачные.
-        Если токен не найден — пробует получить его через get_access_token (как в других режимах).
+        Processes batch of accounts from twitter.txt: makes get request with token and proxy, collects failed ones.
+        If token not found — tries to get it through get_access_token (as in other modes).
         """
         tasks = []
         failed_accounts = []
@@ -1254,19 +1118,20 @@ class Teneo:
         for account in accounts_batch:
             email = account.get("Email")
             password = account.get("Password")
-            token = account.get("TwitterToken")
-            if not token:
-                token = self.get_saved_token(email)
+            pkey = account.get("PrivateKey")
+            t_token = account.get("TwitterToken")
+            if not t_token:
+                t_token = self.get_saved_token(email)
             proxy = self.get_next_proxy_for_account(email) if use_proxy else None
-            if not token:
+            if not t_token:
                 if password:
-                    self.log(f"{Fore.YELLOW}Пробую получить токен для {email} через авторизацию...{Style.RESET_ALL}")
-                    token = await self.get_access_token(email, password, use_proxy)
-                if not token:
-                    self.log(f"{Fore.RED}Токен для {email} не найден и не удалось получить через авторизацию! Пропуск...{Style.RESET_ALL}")
+                    self.log(f"{Fore.YELLOW}Trying to get token for {email} through authorization...{Style.RESET_ALL}")
+                    t_token = await self.get_access_token(email, password, use_proxy)
+                if not t_token:
+                    self.log(f"{Fore.RED}Token for {email} not found and failed to get through authorization! Skipping...{Style.RESET_ALL}")
                     failed_accounts.append(account)
                     continue
-            tasks.append(self.get_isppaccepted_with_token(token, email, proxy))
+            tasks.append(self.connect_twitter(email, pkey,t_token,proxy))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for account, result in zip(accounts_batch, results):
             if isinstance(result, Exception) or not result:
@@ -1372,7 +1237,7 @@ class Teneo:
                     self.log(f"{Fore.RED+Style.BRIGHT}No accounts loaded from data/wallet.txt{Style.RESET_ALL}")
                     return
 
-                # Проверяем, что есть аккаунты с кошельками
+                # Check that there are accounts with wallets
                 accounts_with_wallet = [acc for acc in accounts if acc.get('Wallet')]
                 if not accounts_with_wallet:
                     self.log(f"{Fore.RED+Style.BRIGHT}No accounts with wallet addresses found. Format should be email:password:wallet{Style.RESET_ALL}")

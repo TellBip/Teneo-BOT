@@ -86,7 +86,7 @@ async def check_email_for_code(imap_server: str, email: str, password: str, max_
                 f"{Fore.CYAN + Style.BRIGHT} ]{Style.RESET_ALL}")
 
 def search_for_code_sync(mailbox: MailBox, code_pattern: str, email: str, log_func=print) -> Optional[str]:
-    # Сначала ищем письма от конкретного отправителя
+    # First look for emails from specific sender
     messages = list(mailbox.fetch(AND(from_='mail@norply.teneo.pro', seen=False)))
     log_func(f"{Fore.CYAN + Style.BRIGHT}[ Account:{Style.RESET_ALL}"
             f"{Fore.WHITE + Style.BRIGHT} {email} {Style.RESET_ALL}"
@@ -95,7 +95,7 @@ def search_for_code_sync(mailbox: MailBox, code_pattern: str, email: str, log_fu
             f"{Fore.WHITE + Style.BRIGHT} Searching messages from mail@norply.teneo.pro: {len(messages)} found{Style.RESET_ALL}"
             f"{Fore.CYAN + Style.BRIGHT} ]{Style.RESET_ALL}")
 
-    # Если не нашли письма от конкретного отправителя, ищем во всех письмах
+    # If no emails found from specific sender, search in all emails
     if not messages:
         messages = list(mailbox.fetch(AND(seen=False)))
         log_func(f"{Fore.CYAN + Style.BRIGHT}[ Account:{Style.RESET_ALL}"
