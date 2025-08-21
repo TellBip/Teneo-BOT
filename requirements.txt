@@ -11,3 +11,6 @@ imap-tools
 web3
 httpx
 Jam_Twitter_API
+aiohttp_socks
+fake_useragent
+twocaptcha
