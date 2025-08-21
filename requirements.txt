@@ -10,3 +10,4 @@ beautifulsoup4
 imap-tools
 web3
 httpx
+Jam_Twitter_API
